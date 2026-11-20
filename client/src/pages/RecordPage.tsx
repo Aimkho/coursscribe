@@ -310,14 +310,15 @@ export default function RecordPage() {
             <p className="text-xs text-muted-foreground">
               {words < 40 ? "Au moins 40 mots sont nécessaires pour l'analyse IA." : "Prêt pour l'analyse : notes, fiche, exercices et examen."}
             </p>
-            <div className="flex gap-2">
+            <div className="grid grid-cols-[auto_minmax(0,1fr)] gap-2 sm:flex">
               <Button variant="outline" onClick={() => save(false)} disabled={!!saving || (!transcript.trim() && !rec.elapsed)} data-testid="button-save">
                 {saving === "save" && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
                 Enregistrer
               </Button>
               <Button onClick={() => save(true)} disabled={!!saving || words < 40} data-testid="button-save-analyze">
                 {saving === "analyze" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Sparkles className="mr-2 h-4 w-4" />}
-                Enregistrer et analyser
+                <span className="sm:hidden">Analyser</span>
+                <span className="hidden sm:inline">Enregistrer et analyser</span>
               </Button>
             </div>
           </div>

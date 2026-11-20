@@ -49,7 +49,13 @@ export const courseInputSchema = z.object({
   transcript: z.string().max(400000).default(""),
   durationSec: z.number().int().min(0).max(60 * 60 * 12).default(0),
 });
-export const coursePatchSchema = courseInputSchema.partial().extend({
+// Pas de .default() ici : un PATCH partiel ne doit jamais écraser les champs absents.
+export const coursePatchSchema = z.object({
+  title: z.string().trim().min(1, "Titre requis").max(140).optional(),
+  subject: z.string().trim().max(80).optional(),
+  level: z.string().trim().max(80).optional(),
+  transcript: z.string().max(400000).optional(),
+  durationSec: z.number().int().min(0).max(60 * 60 * 12).optional(),
   isPublic: z.boolean().optional(),
 });
 

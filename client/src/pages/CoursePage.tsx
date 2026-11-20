@@ -369,7 +369,7 @@ export default function CoursePage({ id, publicView }: { id: number; publicView?
       )}
 
       <div className="no-print -mx-4 mb-6 overflow-x-auto px-4 sm:mx-0 sm:px-0">
-        <div className="inline-flex min-w-full gap-1 border-b border-border sm:min-w-0">
+        <div className="flex w-max min-w-full gap-1 border-b border-border">
           {TABS.map((t) => {
             const ready = t.id === "transcript" || !!course[t.id as Kind];
             const busy = t.id !== "transcript" && pending.has(t.id as Kind);

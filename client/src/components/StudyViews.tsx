@@ -617,9 +617,11 @@ export function ExamView({ exam, courseId }: { exam: Exam; courseId: number }) {
               {on20.toFixed(1).replace(".", ",")}
               <span className="text-2xl text-white/60">/20</span>
             </p>
-            <p className="mt-1 text-sm text-white/60">
-              {grade.score} / {grade.max} points
-            </p>
+            {grade.max !== 20 && (
+              <p className="mt-1 text-sm text-white/60">
+                {String(grade.score).replace(".", ",")} / {grade.max} points
+              </p>
+            )}
           </div>
           <div className="min-w-0 sm:border-l sm:border-white/10 sm:pl-8">
             {grade.overall_feedback && <p className="text-sm leading-6 text-white/85">{grade.overall_feedback}</p>}

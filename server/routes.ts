@@ -302,7 +302,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           }
           overall = str(g.overall_feedback);
           priorities = arr(g.priorities).map(str);
-        } catch {
+        } catch (e: any) {
+          fs.appendFileSync("gen-errors.log", `${new Date().toISOString()} grade ${e?.status ?? ""} ${e?.message}\n`);
           return res.status(502).json({ message: "La correction des réponses rédigées a échoué. Tes réponses sont conservées : réessaie." });
         }
       }
