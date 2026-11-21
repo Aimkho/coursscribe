@@ -2,10 +2,12 @@ import { QueryClient, QueryFunction } from "@tanstack/react-query";
 
 export const API_BASE = "__PORT_5000__".startsWith("__") ? "" : "__PORT_5000__";
 
-// Jeton de session : en mémoire, et dans le navigateur quand c'est possible
-// (sur un vrai domaine, la session survit au rechargement ; dans l'aperçu intégré le stockage est bloqué).
+// Jeton de session : en mémoire ; sur Vercel (VITE_PERSIST_TOKEN=1 au build), aussi dans le navigateur
+// pour que la session survive au rechargement. L'aperçu intégré n'autorise pas ce stockage.
 const TOKEN_KEY = "cs_token";
+const PERSIST = import.meta.env.VITE_PERSIST_TOKEN === "1";
 function readStoredToken(): string | null {
+  if (!PERSIST) return null;
   try {
     return window.localStorage.getItem(TOKEN_KEY);
   } catch {
@@ -17,6 +19,7 @@ let onUnauthorized: (() => void) | null = null;
 let onConsentRequired: (() => void) | null = null;
 export function setAuthToken(t: string | null) {
   authToken = t;
+  if (!PERSIST) return;
   try {
     if (t) window.localStorage.setItem(TOKEN_KEY, t);
     else window.localStorage.removeItem(TOKEN_KEY);

@@ -17,6 +17,7 @@ async function main() {
   await rm(OUT, { recursive: true, force: true });
 
   console.log("client…");
+  process.env.VITE_PERSIST_TOKEN = "1"; // session conservée après rechargement sur le vrai domaine
   await viteBuild();
   await mkdir(`${OUT}/static`, { recursive: true });
   await cp("dist/public", `${OUT}/static`, { recursive: true });
