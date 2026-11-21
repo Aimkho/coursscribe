@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import PDFDocument from "pdfkit";
 import path from "node:path";
 import type { Course } from "@shared/schema";
@@ -16,7 +17,14 @@ const C = {
   roseSoft: "#FFF0F6",
 };
 
-const FONT_DIR = path.resolve("server/fonts");
+// Polices : à côté du bundle (fonction Vercel) ou dans server/fonts (local).
+const FONT_DIR = [path.join(typeof __dirname === "string" ? __dirname : "", "fonts"), path.resolve("server/fonts")].find((d) => {
+  try {
+    return fs.existsSync(path.join(d, "Lato-Regular.ttf"));
+  } catch {
+    return false;
+  }
+}) || path.resolve("server/fonts");
 
 // Caractères absents de la police : remplacés par un équivalent lisible.
 const SUBST: [RegExp, string][] = [
@@ -37,6 +45,8 @@ export function renderPdf(course: Course, rawBlocks: Block[]): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const doc = new PDFDocument({
       size: "A4",
+      // Police par défaut = Lato : évite de charger Helvetica depuis le dossier de pdfkit (absent sur Vercel).
+      font: path.join(FONT_DIR, "Lato-Regular.ttf"),
       margins: { top: 64, bottom: 64, left: 56, right: 56 },
       bufferPages: true,
       info: { Title: c.title, Author: c.ownerName || "CoursScribe", Creator: "CoursScribe" },

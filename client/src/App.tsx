@@ -12,6 +12,8 @@ import { DashboardPage, LibraryPage } from "@/pages/ListPages";
 import RecordPage from "@/pages/RecordPage";
 import CoursePage from "@/pages/CoursePage";
 import SubjectPage from "@/pages/SubjectPage";
+import ConsentPage from "@/pages/ConsentPage";
+import PrivacyPage from "@/pages/PrivacyPage";
 
 function AppRouter() {
   const { user, ready } = useAuth();
@@ -20,6 +22,7 @@ function AppRouter() {
       <div className="grid min-h-screen place-items-center text-sm text-muted-foreground">Ouverture de ta session…</div>
     );
   if (!user) return <AuthPage />;
+  if (!user.aiConsent) return <ConsentPage />;
   return (
     <AppShell>
       <Switch>
@@ -29,6 +32,7 @@ function AppRouter() {
         <Route path="/record/continue/:id">{(p) => <RecordPage key={`c${p.id}`} continueId={Number(p.id)} />}</Route>
         <Route path="/subject/:id">{(p) => <SubjectPage key={p.id} id={Number(p.id)} />}</Route>
         <Route path="/library" component={LibraryPage} />
+        <Route path="/privacy" component={PrivacyPage} />
         <Route path="/course/:id">{(p) => <CoursePage key={p.id} id={Number(p.id)} />}</Route>
         <Route path="/public/:id">{(p) => <CoursePage key={`p${p.id}`} id={Number(p.id)} publicView />}</Route>
         <Route component={NotFound} />

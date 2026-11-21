@@ -1,72 +1,17 @@
-import fs from "node:fs";
-import os from "node:os";
-import { execFile } from "node:child_process";
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import path from "node:path";
-import readline from "node:readline";
-import { randomBytes } from "node:crypto";
-
 /**
- * Transcription audio réelle (speech-to-text) via un worker Python persistant
- * (SDK LLM API, modèle Gemini). Le worker est démarré à la première requête
- * et relancé automatiquement s'il s'arrête.
+ * Transcription audio (speech-to-text) avec Gemini.
+ * - Micro en direct : courts extraits envoyés directement (transcribeInline).
+ * - Fichier importé : téléversement fractionné vers l'API Files de Gemini, puis
+ *   transcription par fenêtres de quelques minutes pilotée par le navigateur
+ *   (chaque requête reste courte : compatible avec les fonctions Vercel).
  */
-let proc: ChildProcessWithoutNullStreams | null = null;
-const pending = new Map<string, { resolve: (t: string) => void; reject: (e: Error) => void; timer: NodeJS.Timeout }>();
+import { q, one } from "./db";
+import { transcribeInline, transcribeWindow, startResumableUpload, uploadChunk, getFile, deleteFile } from "./gemini";
 
-function ensureWorker() {
-  if (proc && proc.exitCode === null) return proc;
-  const script = path.resolve("server/py/stt_worker.py");
-  const p = spawn(process.env.PYTHON_BIN || "python3", [script], { stdio: ["pipe", "pipe", "pipe"], env: process.env });
-  const rl = readline.createInterface({ input: p.stdout });
-  rl.on("line", (line) => {
-    let msg: any;
-    try {
-      msg = JSON.parse(line);
-    } catch {
-      return;
-    }
-    if (!msg?.id) return;
-    const entry = pending.get(msg.id);
-    if (!entry) return;
-    pending.delete(msg.id);
-    clearTimeout(entry.timer);
-    if (msg.error) entry.reject(new Error(msg.error));
-    else entry.resolve(String(msg.text || ""));
-  });
-  p.stderr.on("data", (d) => console.error("[stt]", String(d).slice(0, 400)));
-  p.on("exit", () => {
-    pending.forEach((e) => {
-      clearTimeout(e.timer);
-      e.reject(new Error("Le service de transcription s'est arrêté."));
-    });
-    pending.clear();
-    proc = null;
-  });
-  proc = p;
-  return p;
-}
-
-function once(audio: Buffer, mime: string, context: string): Promise<string> {
-  const p = ensureWorker();
-  const id = randomBytes(8).toString("hex");
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      pending.delete(id);
-      reject(new Error("Délai de transcription dépassé."));
-    }, 45000);
-    pending.set(id, { resolve, reject, timer });
-    p.stdin.write(JSON.stringify({ id, b64: audio.toString("base64"), mime, context }) + "\n");
-  });
-}
-
-export async function transcribeAudio(audio: Buffer, mime: string, context = ""): Promise<string> {
-  try {
-    return await once(audio, mime, context);
-  } catch {
-    // Un second essai suffit généralement (délai ponctuel du fournisseur).
-    return await once(audio, mime, context);
-  }
+export async function transcribeAudio(audio: Buffer, mime: string, context = "", userId: number | null = null) {
+  // Estimation de la durée de l'extrait (Opus ~32-48 kbit/s) pour le suivi des coûts.
+  const approxSec = Math.min(30, Math.max(1, audio.length / 5000));
+  return transcribeInline(audio, mime, context, userId, approxSec);
 }
 
 /** Nettoie le texte renvoyé par le modèle. */
@@ -74,91 +19,82 @@ export function cleanTranscript(t: string) {
   return t
     .replace(/^["«»\s]+|["«»\s]+$/g, "")
     .replace(/\[(silence|inaudible|musique|bruit)[^\]]*\]/gi, "")
+    .replace(/[\[(]\d{1,2}:\d{2}(?::\d{2})?(?:\s*[-–]\s*\d{1,2}:\d{2}(?::\d{2})?)?[\])]/g, "")
     .replace(/\s{2,}/g, " ")
     .trim();
 }
 
-// ---------- Import d'un fichier audio complet ----------
+// ---------- Import d'un fichier audio ----------
 
-type FileJob = {
-  id: string;
-  userId: number;
-  status: "running" | "done" | "error";
-  done: number;
-  total: number;
-  durationSec: number;
-  text: string;
-  error?: string;
-  createdAt: number;
-};
-const jobs = new Map<string, FileJob>();
-const SEGMENT_SEC = 50;
+export const IMPORT_CHUNK = 4 * 1024 * 1024; // multiple de 256 Kio, sous la limite de 4,5 Mo de Vercel
+export const IMPORT_MAX_BYTES = 500 * 1024 * 1024;
 
-function run(cmd: string, args: string[]) {
-  return new Promise<string>((resolve, reject) =>
-    execFile(cmd, args, { maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) =>
-      err ? reject(new Error(String(stderr || err.message).slice(-300))) : resolve(String(stdout)),
-    ),
+type ImportJob = { id: number; user_id: number; upload_url: string; size: number; mime: string; file_name: string | null; file_uri: string | null; pending: Buffer | null; sent: number; granularity: number };
+
+export async function createImport(userId: number, size: number, mime: string, name: string) {
+  // Nettoyage des imports de plus de 24 h
+  const old = await q<ImportJob>(`delete from public.import_jobs where created_at < $1 returning file_name`, [Date.now() - 86400_000]);
+  for (const o of old) if (o.file_name) void deleteFile(o.file_name);
+  const { url, granularity } = await startResumableUpload(size, mime, name || "cours");
+  const row = await one<{ id: number }>(
+    `insert into public.import_jobs (user_id, upload_url, size, mime, granularity, created_at) values ($1, $2, $3, $4, $5, $6) returning id`,
+    [userId, url, size, mime, granularity, Date.now()],
   );
+  return row!.id;
 }
 
-export function startFileJob(userId: number, data: Buffer, mime: string, context: string) {
-  const id = randomBytes(10).toString("hex");
-  const job: FileJob = { id, userId, status: "running", done: 0, total: 0, durationSec: 0, text: "", createdAt: Date.now() };
-  jobs.set(id, job);
-  // Nettoyage des anciennes tâches (1 h)
-  jobs.forEach((j, k) => {
-    if (Date.now() - j.createdAt > 3600_000) jobs.delete(k);
-  });
-  processFile(job, data, mime, context).catch((e) => {
-    job.status = "error";
-    job.error = e?.message?.includes("Invalid data") ? "Format audio non reconnu." : "La transcription du fichier a échoué.";
-    console.error("file job", e?.message);
-  });
-  return id;
+async function getImport(id: number, userId: number) {
+  return one<ImportJob>(`select * from public.import_jobs where id = $1 and user_id = $2`, [id, userId]);
 }
 
-async function processFile(job: FileJob, data: Buffer, _mime: string, context: string) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cs-audio-"));
-  try {
-    const input = path.join(dir, "input");
-    fs.writeFileSync(input, data);
-    const dur = Number((await run("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", input])).trim()) || 0;
-    job.durationSec = Math.round(dur);
-    if (dur > 4 * 3600) throw new Error("Fichier trop long (4 h maximum).");
-    await run("ffmpeg", [
-      "-v", "error", "-i", input, "-vn", "-ac", "1", "-ar", "16000", "-b:a", "48k",
-      "-f", "segment", "-segment_time", String(SEGMENT_SEC), "-reset_timestamps", "1", path.join(dir, "seg%04d.mp3"),
-    ]);
-    const segs = fs.readdirSync(dir).filter((f) => f.startsWith("seg")).sort();
-    job.total = segs.length;
-    const out: string[] = new Array(segs.length).fill("");
-    let next = 0;
-    const worker = async () => {
-      while (next < segs.length) {
-        const i = next++;
-        const buf = fs.readFileSync(path.join(dir, segs[i]));
-        try {
-          out[i] = cleanTranscript(await transcribeAudio(buf, "audio/mp3", context));
-        } catch {
-          out[i] = "";
-        }
-        job.done++;
-        // Texte partiel affiché au fil de l'eau (préfixe contigu)
-        job.text = out.filter(Boolean).join(" ");
-      }
-    };
-    await Promise.all(Array.from({ length: Math.min(4, segs.length) }, worker));
-    job.text = out.filter(Boolean).join(" ");
-    job.status = "done";
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
+/**
+ * Reçoit un morceau de 4 Mo du navigateur. Google impose des envois multiples de sa
+ * « granularité » (8 Mo) : le reste est gardé en base jusqu'au morceau suivant,
+ * ce qui fonctionne même si chaque requête arrive sur une instance serveur différente.
+ */
+export async function importChunk(id: number, userId: number, offset: number, chunk: Buffer) {
+  const job = await getImport(id, userId);
+  if (!job) return { error: "Import introuvable." as const };
+  const pending = job.pending ? Buffer.from(job.pending) : Buffer.alloc(0);
+  const expected = job.sent + pending.length;
+  if (offset !== expected) {
+    if (offset < expected && offset + chunk.length <= expected) return { done: false, received: expected }; // morceau déjà reçu (nouvel essai)
+    return { error: `Morceau inattendu (attendu à ${expected}).` as const };
   }
+  const buf = Buffer.concat([pending, chunk]);
+  const last = expected + chunk.length >= job.size;
+  const gran = job.granularity || 8 * 1024 * 1024;
+  const sendLen = last ? buf.length : Math.floor(buf.length / gran) * gran;
+  if (sendLen > 0) {
+    const file = await uploadChunk(job.upload_url, job.sent, buf.subarray(0, sendLen), last);
+    if (file) {
+      await q(`update public.import_jobs set file_name = $1, file_uri = $2, mime = $3, pending = null, sent = $4 where id = $5`, [
+        file.name, file.uri, file.mimeType || job.mime, job.size, id,
+      ]);
+      return { done: true, state: file.state };
+    }
+  }
+  await q(`update public.import_jobs set pending = $1, sent = $2 where id = $3`, [buf.length > sendLen ? buf.subarray(sendLen) : null, job.sent + sendLen, id]);
+  return { done: false, received: expected + chunk.length };
 }
 
-export function getFileJob(id: string, userId: number) {
-  const j = jobs.get(id);
-  if (!j || j.userId !== userId) return undefined;
-  const { userId: _u, ...rest } = j;
-  return rest;
+export async function importStatus(id: number, userId: number) {
+  const job = await getImport(id, userId);
+  if (!job || !job.file_name) return { state: "MISSING" };
+  const f = await getFile(job.file_name);
+  return { state: f.state };
+}
+
+export async function importTranscribePart(id: number, userId: number, start: number, end: number, duration: number, context: string) {
+  const job = await getImport(id, userId);
+  if (!job || !job.file_uri) return { error: "Import introuvable." as const };
+  const text = cleanTranscript(await transcribeWindow(job.file_uri, job.mime, start, end, duration || end, context, userId));
+  return { text };
+}
+
+export async function finishImport(id: number, userId: number) {
+  const job = await getImport(id, userId);
+  if (!job) return;
+  if (job.file_name) await deleteFile(job.file_name);
+  await q(`delete from public.import_jobs where id = $1`, [id]);
 }

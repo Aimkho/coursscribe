@@ -7,15 +7,27 @@ import path from "node:path";
 import { storage, toCourse, toSummary } from "./storage";
 import { registerSchema, loginSchema, courseInputSchema, coursePatchSchema, subjectInputSchema } from "@shared/schema";
 import type { User, Exam, ExamGrade } from "@shared/schema";
-import { transcribeAudio, cleanTranscript, startFileJob, getFileJob } from "./stt";
+import { transcribeAudio, cleanTranscript, createImport, importChunk, importStatus, importTranscribePart, finishImport, IMPORT_CHUNK, IMPORT_MAX_BYTES } from "./stt";
+import { audioKey, signedUploadUrl, signedDownloadUrl, removeCourseAudio } from "./audioStore";
+import { geminiConfigured } from "./gemini";
 import { buildBlocks, ALL_PARTS, safeFileName, type ExportPart } from "./export/blocks";
 import { renderPdf } from "./export/pdf";
 import { renderDocx } from "./export/docx";
 import { renderPptx } from "./export/pptx";
 import { generateNotes, generateSheet, generateExercises, generateExam, gradeOpenAnswers } from "./ai";
 
-const UPLOAD_DIR = path.resolve("uploads");
-fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+/** Version du texte de consentement : l'incrémenter redemande l'accord à tous les utilisateurs. */
+export const CONSENT_VERSION = 1;
+
+/** Journal d'erreurs : console (Vercel) + fichier local si le disque est accessible. */
+function logErr(line: string) {
+  console.error(line);
+  try {
+    fs.appendFileSync("gen-errors.log", `${new Date().toISOString()} ${line}\n`);
+  } catch {
+    /* disque en lecture seule (Vercel) */
+  }
+}
 
 function hashPassword(pw: string) {
   const salt = randomBytes(16).toString("hex");
@@ -52,31 +64,30 @@ const h =
   (req: AuthedRequest, res: Response) =>
     fn(req, res).catch((e: any) => {
       console.error("route error", req.method, req.path, e?.message);
-      fs.appendFileSync("gen-errors.log", `${new Date().toISOString()} ${req.method} ${req.path} ${e?.stack || e?.message}\n`);
+      logErr(`${req.method} ${req.path} ${e?.stack || e?.message}`);
       if (!res.headersSent) res.status(500).json({ message: "Erreur serveur. Réessaie." });
     });
 
-function audioPath(courseId: number, sessionId?: number) {
-  return path.join(UPLOAD_DIR, sessionId ? `${courseId}-s${sessionId}.webm` : `${courseId}.webm`);
-}
-/** Détecte le format réel (Chrome/Android : webm, iPhone/iPad Safari : mp4) et sert le fichier avec gestion des plages (requis par Safari). */
-function serveAudio(req: Request, res: Response, file: string, baseName: string) {
-  const head = Buffer.alloc(12);
-  const fd = fs.openSync(file, "r");
-  fs.readSync(fd, head, 0, 12, 0);
-  fs.closeSync(fd);
-  const isMp4 = head.toString("latin1", 4, 8) === "ftyp";
-  const isOgg = head.toString("latin1", 0, 4) === "OggS";
-  const isMp3 = head.toString("latin1", 0, 3) === "ID3" || (head[0] === 0xff && (head[1] & 0xe0) === 0xe0);
-  const [type, ext] = isMp4 ? ["audio/mp4", "m4a"] : isOgg ? ["audio/ogg", "ogg"] : isMp3 ? ["audio/mpeg", "mp3"] : ["audio/webm", "webm"];
-  const headers: Record<string, string> = { "Content-Type": type, "Cache-Control": "private, no-store" };
-  if (req.query.download) headers["Content-Disposition"] = `attachment; filename="${baseName}.${ext}"`;
-  res.sendFile(path.resolve(file), { headers, acceptRanges: true });
+async function redirectAudio(req: Request, res: Response, key: string, baseName: string) {
+  const url = await signedDownloadUrl(key, 6 * 3600);
+  if (!url) return res.status(404).end();
+  res.setHeader("Cache-Control", "private, no-store");
+  res.redirect(302, req.query.download ? `${url}&download=${encodeURIComponent(baseName)}` : url);
 }
 const wc = (t: string) => (t.trim() ? t.trim().split(/\s+/).length : 0);
 
 function publicUser(u: User) {
-  return { id: u.id, name: u.name, email: u.email };
+  const ok = !!u.aiConsentAt && (u.aiConsentVersion ?? 0) >= CONSENT_VERSION;
+  return { id: u.id, name: u.name, email: u.email, aiConsent: ok ? { at: u.aiConsentAt!, version: u.aiConsentVersion! } : null };
+}
+
+/** Bloque l'envoi de données à l'IA tant que l'utilisateur n'a pas donné son accord. */
+function requireConsent(req: AuthedRequest, res: Response, next: NextFunction) {
+  const u = req.user!;
+  if (!u.aiConsentAt || (u.aiConsentVersion ?? 0) < CONSENT_VERSION)
+    return res.status(403).json({ code: "consent_required", message: "Accepte d'abord le traitement de tes données par l'IA (écran Confidentialité)." });
+  if (!geminiConfigured()) return res.status(503).json({ message: "L'IA n'est pas configurée sur ce serveur (clé GEMINI_API_KEY manquante)." });
+  next();
 }
 
 function zodMessage(err: any) {
@@ -153,7 +164,6 @@ function normalizeExam(x: any): Exam {
 }
 
 const running = new Set<string>();
-const handoffs = new Map<string, { userId: number; exp: number }>();
 
 export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
   // ---------- Auth ----------
@@ -185,17 +195,16 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   }));
 
   // Transfert de session vers un nouvel onglet (code à usage unique, 2 minutes).
-  app.post("/api/auth/handoff", auth, (req: AuthedRequest, res) => {
+  app.post("/api/auth/handoff", auth, h(async (req, res) => {
     const code = randomBytes(24).toString("hex");
-    handoffs.set(code, { userId: req.user!.id, exp: Date.now() + 120_000 });
+    await storage.createHandoff(code, req.user!.id, Date.now() + 120_000);
     res.json({ code });
-  });
+  }));
   app.post("/api/auth/handoff/redeem", h(async (req, res) => {
     const code = String(req.body?.code || "");
-    const hnd = handoffs.get(code);
-    handoffs.delete(code);
-    if (!hnd || hnd.exp < Date.now()) return res.status(401).json({ message: "Lien expiré. Reconnecte-toi." });
-    const user = await storage.getUser(hnd.userId);
+    const userId = code ? await storage.redeemHandoff(code) : undefined;
+    if (!userId) return res.status(401).json({ message: "Lien expiré. Reconnecte-toi." });
+    const user = await storage.getUser(userId);
     if (!user) return res.status(401).json({ message: "Compte introuvable." });
     const token = randomBytes(32).toString("hex");
     await storage.createSession(token, user.id);
@@ -203,6 +212,36 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   }));
 
   app.get("/api/auth/me", auth, (req: AuthedRequest, res) => res.json(publicUser(req.user!)));
+
+  // ---------- Consentement et données personnelles (RGPD) ----------
+  app.post("/api/consent", auth, h(async (req, res) => {
+    const b = req.body || {};
+    if (b.ai !== true || b.age !== true || b.recording !== true)
+      return res.status(400).json({ message: "Les trois cases doivent être cochées pour utiliser l'IA." });
+    await storage.setConsent(req.user!.id, CONSENT_VERSION);
+    res.json(publicUser((await storage.getUser(req.user!.id))!));
+  }));
+
+  app.delete("/api/consent", auth, h(async (req, res) => {
+    await storage.setConsent(req.user!.id, null);
+    res.json(publicUser((await storage.getUser(req.user!.id))!));
+  }));
+
+  app.get("/api/account/export", auth, h(async (req, res) => {
+    const rows = await storage.listMyCourses(req.user!.id);
+    const courses = await Promise.all(rows.map((r) => toCourse(r, req.user!.id)));
+    res.setHeader("Content-Disposition", `attachment; filename="coursscribe-mes-donnees.json"`);
+    res.json({ exportedAt: new Date().toISOString(), user: publicUser(req.user!), subjects: await storage.listSubjects(req.user!.id), courses });
+  }));
+
+  app.delete("/api/account", auth, h(async (req, res) => {
+    const pw = String(req.body?.password || "");
+    if (!verifyPassword(pw, req.user!.passwordHash)) return res.status(401).json({ message: "Mot de passe incorrect." });
+    const ids = await storage.listCourseIds(req.user!.id);
+    await Promise.all(ids.map((id) => removeCourseAudio(id)));
+    await storage.deleteUser(req.user!.id);
+    res.json({ ok: true });
+  }));
 
   // ---------- Matières ----------
   app.get("/api/subjects", auth, h(async (req, res) => {
@@ -322,8 +361,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     const sessions = await storage.listCourseSessions(id).catch(() => []);
     const ok = await storage.deleteCourse(id, req.user!.id);
     if (!ok) return res.status(404).json({ message: "Cours introuvable." });
-    fs.rmSync(audioPath(id), { force: true });
-    for (const s of sessions) fs.rmSync(audioPath(id, s.id), { force: true });
+    void sessions;
+    await removeCourseAudio(id);
     res.json({ ok: true });
   }));
 
@@ -351,30 +390,30 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     res.json({ ok: true, savedAt: Date.now(), session });
   }));
 
-  app.post(
-    "/api/courses/:id/sessions/:sid/audio",
-    auth,
-    express.raw({ type: () => true, limit: "300mb" }),
-    h(async (req, res) => {
-      const row = await owned(req, res);
-      if (!row) return;
-      const sid = Number(req.params.sid);
-      const s = await storage.getCourseSession(row.id, sid);
-      if (!s) return res.status(404).json({ message: "Séance introuvable." });
-      if (!Buffer.isBuffer(req.body) || req.body.length === 0) return res.status(400).json({ message: "Fichier audio vide." });
-      fs.writeFileSync(audioPath(row.id, sid), req.body);
-      await storage.updateCourseSession(row.id, sid, { hasAudio: true });
-      await storage.updateCourse(row.id, req.user!.id, { hasAudio: true, transcriptUpdatedAt: row.transcriptUpdatedAt });
-      res.json({ ok: true, bytes: req.body.length });
-    }),
-  );
+  // L'audio est envoyé directement par le navigateur vers Supabase Storage (URL signée).
+  app.post("/api/courses/:id/sessions/:sid/audio-upload", auth, h(async (req, res) => {
+    const row = await owned(req, res);
+    if (!row) return;
+    const s = await storage.getCourseSession(row.id, Number(req.params.sid));
+    if (!s) return res.status(404).json({ message: "Séance introuvable." });
+    res.json({ url: await signedUploadUrl(audioKey(row.id, s.id)) });
+  }));
+
+  app.post("/api/courses/:id/sessions/:sid/audio-done", auth, h(async (req, res) => {
+    const row = await owned(req, res);
+    if (!row) return;
+    const sid = Number(req.params.sid);
+    const s = await storage.getCourseSession(row.id, sid);
+    if (!s) return res.status(404).json({ message: "Séance introuvable." });
+    await storage.updateCourseSession(row.id, sid, { hasAudio: true });
+    await storage.updateCourse(row.id, req.user!.id, { hasAudio: true, transcriptUpdatedAt: row.transcriptUpdatedAt });
+    res.json({ ok: true });
+  }));
 
   app.get("/api/courses/:id/sessions/:sid/audio", auth, h(async (req, res) => {
     const row = await owned(req, res);
     if (!row) return;
-    const file = audioPath(row.id, Number(req.params.sid));
-    if (!fs.existsSync(file)) return res.status(404).end();
-    serveAudio(req, res, file, `cours-${row.id}-seance-${req.params.sid}`);
+    await redirectAudio(req, res, audioKey(row.id, Number(req.params.sid)), `cours-${row.id}-seance-${req.params.sid}`);
   }));
 
   // ---------- Exports PDF / Word / PowerPoint ----------
@@ -413,7 +452,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       }
       res.status(400).json({ message: "Format inconnu." });
     } catch (e: any) {
-      fs.appendFileSync("gen-errors.log", `${new Date().toISOString()} export ${format} ${e?.stack || e?.message}\n`);
+      logErr(`export ${format} ${e?.stack || e?.message}`);
       res.status(500).json({ message: "L'export a échoué. Réessaie." });
     }
   });
@@ -422,66 +461,77 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.post(
     "/api/transcribe",
     auth,
+    requireConsent,
     express.raw({ type: () => true, limit: "20mb" }),
     async (req: AuthedRequest, res) => {
       if (!Buffer.isBuffer(req.body) || req.body.length < 800) return res.json({ text: "" });
       const mime = String(req.headers["content-type"] || "audio/webm").split(";")[0] || "audio/webm";
       const context = String(req.query.context || "").slice(0, 300);
       try {
-        const text = cleanTranscript(await transcribeAudio(req.body, mime, context));
+        const text = cleanTranscript(await transcribeAudio(req.body, mime, context, req.user!.id));
         res.json({ text });
       } catch (e: any) {
-        fs.appendFileSync("gen-errors.log", `${new Date().toISOString()} stt ${e?.message}\n`);
-        res.status(502).json({ message: "Transcription momentanément indisponible." });
+        logErr(`stt ${e?.status ?? ""} ${e?.message}`);
+        res.status(e?.status === 429 ? 429 : 502).json({ message: e?.status === 429 ? "Quota de l'IA atteint pour le moment. L'audio continue d'être enregistré." : "Transcription momentanément indisponible." });
       }
     },
   );
 
   // ---------- Audio (ancien format : un fichier par cours) ----------
-  app.post(
-    "/api/courses/:id/audio",
-    auth,
-    express.raw({ type: () => true, limit: "300mb" }),
-    h(async (req, res) => {
-      const row = await owned(req, res);
-      if (!row) return;
-      if (!Buffer.isBuffer(req.body) || req.body.length === 0) return res.status(400).json({ message: "Fichier audio vide." });
-      fs.writeFileSync(audioPath(row.id), req.body);
-      await storage.updateCourse(row.id, req.user!.id, { hasAudio: true, transcriptUpdatedAt: row.transcriptUpdatedAt });
-      res.json({ ok: true, bytes: req.body.length });
-    }),
-  );
-
   app.get("/api/courses/:id/audio", auth, h(async (req, res) => {
     const row = await owned(req, res);
     if (!row) return;
-    const file = audioPath(row.id);
-    if (!fs.existsSync(file)) return res.status(404).end();
-    serveAudio(req, res, file, `cours-${row.id}`);
+    await redirectAudio(req, res, audioKey(row.id), `cours-${row.id}`);
   }));
 
   // ---------- Import d'un enregistrement audio (fichier du téléphone, dictaphone…) ----------
-  app.post(
-    "/api/transcribe-file",
+  // 1) start : ouvre un téléversement chez Gemini ; 2) chunk : morceaux de 4 Mo ;
+  // 3) status : attend que le fichier soit prêt ; 4) part : transcrit une fenêtre de quelques minutes ; 5) delete.
+  app.post("/api/import/start", auth, requireConsent, h(async (req, res) => {
+    const size = Math.round(Number(req.body?.size) || 0);
+    const mime = String(req.body?.mime || "").split(";")[0] || "audio/mpeg";
+    if (size < 2000) return res.status(400).json({ message: "Fichier audio vide ou illisible." });
+    if (size > IMPORT_MAX_BYTES) return res.status(400).json({ message: "Fichier trop volumineux (500 Mo maximum)." });
+    const id = await createImport(req.user!.id, size, mime, String(req.body?.name || "cours"));
+    res.json({ id, chunkSize: IMPORT_CHUNK });
+  }));
+
+  app.put(
+    "/api/import/:id/chunk",
     auth,
-    express.raw({ type: () => true, limit: "400mb" }),
+    express.raw({ type: () => true, limit: "5mb" }),
     h(async (req, res) => {
-      if (!Buffer.isBuffer(req.body) || req.body.length < 2000) return res.status(400).json({ message: "Fichier audio vide ou illisible." });
-      const mime = String(req.headers["content-type"] || "application/octet-stream").split(";")[0];
-      const context = String(req.query.context || "").slice(0, 300);
-      const job = startFileJob(req.user!.id, req.body, mime, context);
-      res.json({ jobId: job });
+      if (!Buffer.isBuffer(req.body) || !req.body.length) return res.status(400).json({ message: "Morceau vide." });
+      const r = await importChunk(Number(req.params.id), req.user!.id, Math.max(0, Number(req.query.offset) || 0), req.body);
+      if ("error" in r) return res.status(404).json({ message: r.error });
+      res.json(r);
     }),
   );
 
-  app.get("/api/transcribe-file/:job", auth, (req: AuthedRequest, res) => {
-    const j = getFileJob(String(req.params.job), req.user!.id);
-    if (!j) return res.status(404).json({ message: "Tâche introuvable." });
-    res.json(j);
-  });
+  app.get("/api/import/:id/status", auth, h(async (req, res) => {
+    res.json(await importStatus(Number(req.params.id), req.user!.id));
+  }));
+
+  app.post("/api/import/:id/part", auth, requireConsent, h(async (req, res) => {
+    const start = Math.max(0, Number(req.body?.start) || 0);
+    const end = Math.max(start + 1, Number(req.body?.end) || 0);
+    try {
+      const r = await importTranscribePart(Number(req.params.id), req.user!.id, start, Math.min(end, start + 3600), Number(req.body?.duration) || 0, String(req.body?.context || "").slice(0, 300));
+      if ("error" in r) return res.status(404).json({ message: r.error });
+      res.json(r);
+    } catch (e: any) {
+      logErr(`import part ${e?.status ?? ""} ${e?.message}`);
+      res.status(e?.status === 429 ? 429 : 502).json({ message: e?.status === 429 ? "Quota de l'IA atteint. Réessaie dans une minute." : "Un passage n'a pas pu être transcrit." });
+    }
+  }));
+
+  app.delete("/api/import/:id", auth, h(async (req, res) => {
+    await finishImport(Number(req.params.id), req.user!.id);
+    res.json({ ok: true });
+  }));
 
   // ---------- Génération IA ----------
-  app.post("/api/courses/:id/generate/:kind", auth, h(async (req: AuthedRequest, res) => {
+  app.post("/api/courses/:id/generate/:kind", auth, requireConsent, h(async (req: AuthedRequest, res) => {
     const kind = String(req.params.kind);
     if (!["notes", "sheet", "exercises", "exam"].includes(kind)) return res.status(400).json({ message: "Type inconnu." });
     const row = await storage.getCourse(Number(req.params.id));
@@ -498,24 +548,24 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       let notes = row.notes ?? null;
       const patch: any = {};
       if (kind === "notes" || !notes) {
-        notes = normalizeNotes(await generateNotes(meta, row.transcript));
+        notes = normalizeNotes(await generateNotes(meta, row.transcript, req.user!.id));
         patch.notes = notes;
         patch.analyzedAt = started;
       }
-      if (kind === "sheet") patch.sheet = normalizeSheet(await generateSheet(meta, row.transcript, notes));
-      if (kind === "exercises") patch.exercises = normalizeExercises(await generateExercises(meta, row.transcript, notes));
-      if (kind === "exam") patch.exam = normalizeExam(await generateExam(meta, row.transcript, notes));
+      if (kind === "sheet") patch.sheet = normalizeSheet(await generateSheet(meta, row.transcript, notes, req.user!.id));
+      if (kind === "exercises") patch.exercises = normalizeExercises(await generateExercises(meta, row.transcript, notes, req.user!.id));
+      if (kind === "exam") patch.exam = normalizeExam(await generateExam(meta, row.transcript, notes, req.user!.id));
       const updated = (await storage.updateCourse(row.id, req.user!.id, patch))!;
       res.json(await toCourse(updated, req.user!.id));
     } catch (e: any) {
-      console.error("generation error", e?.message); fs.appendFileSync("gen-errors.log", `${new Date().toISOString()} ${kind} ${e?.status ?? ""} ${e?.message}\n`);
+      logErr(`generation ${kind} ${e?.status ?? ""} ${e?.message}`);
       res.status(502).json({ message: "L'IA n'a pas pu terminer la génération. Ta transcription est intacte : réessaie dans un instant." });
     } finally {
       running.delete(key);
     }
   }));
 
-  app.post("/api/courses/:id/exam/grade", auth, h(async (req: AuthedRequest, res) => {
+  app.post("/api/courses/:id/exam/grade", auth, requireConsent, h(async (req: AuthedRequest, res) => {
     const row = await viewable(req, res);
     if (!row) return;
     const exam: Exam | null = row.exam ?? null;
@@ -546,7 +596,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         overall = "Les questions rédigées n'ont pas été traitées.";
       } else {
         try {
-          const g = await gradeOpenAnswers({ title: row.title, subject: row.subject, level: row.level }, open);
+          const g = await gradeOpenAnswers({ title: row.title, subject: row.subject, level: row.level }, open, req.user!.id);
           for (const o of open) {
             const r = arr(g.per_question).find((p: any) => p.id === o.id);
             const pts = Math.max(0, Math.min(o.points, Number(r?.points_awarded) || 0));
@@ -555,7 +605,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           overall = str(g.overall_feedback);
           priorities = arr(g.priorities).map(str);
         } catch (e: any) {
-          fs.appendFileSync("gen-errors.log", `${new Date().toISOString()} grade ${e?.status ?? ""} ${e?.message}\n`);
+          logErr(`grade ${e?.status ?? ""} ${e?.message}`);
           return res.status(502).json({ message: "La correction des réponses rédigées a échoué. Tes réponses sont conservées : réessaie." });
         }
       }

@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 // Tables Postgres (Supabase, schéma "coursscribe") — voir server/storage.ts
-export type User = { id: number; email: string; name: string; passwordHash: string };
+export type User = { id: number; email: string; name: string; passwordHash: string; aiConsentAt?: number | null; aiConsentVersion?: number | null };
 export type CourseStatus = "en_cours" | "termine";
 export type CourseRow = {
   id: number;
@@ -156,4 +156,4 @@ export type CourseSummary = Omit<Course, "transcript" | "notes" | "sheet" | "exe
   hasExam: boolean;
   sessionCount: number;
 };
-export type PublicUser = { id: number; name: string; email: string };
+export type PublicUser = { id: number; name: string; email: string; aiConsent: { at: number; version: number } | null };

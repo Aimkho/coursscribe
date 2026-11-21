@@ -383,7 +383,8 @@ export function useRecorder(
         : MediaRecorder.isTypeSupported("audio/mp4")
           ? "audio/mp4"
           : "";
-      const rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+      // 48 kbit/s : voix claire, ~22 Mo par heure de cours (stockage et envoi plus légers)
+      const rec = new MediaRecorder(stream, { ...(mime ? { mimeType: mime } : {}), audioBitsPerSecond: 48000 });
       chunksRef.current = [];
       rec.ondataavailable = (e) => e.data.size && chunksRef.current.push(e.data);
       rec.onstop = () => {

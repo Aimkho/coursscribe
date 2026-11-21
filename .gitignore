@@ -5,3 +5,6 @@ uploads
 gen-errors.log
 .env
 .env.*
+.vercel
+
+!.env.example

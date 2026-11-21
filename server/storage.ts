@@ -97,15 +97,15 @@ const JSON_COLS = new Set(["notes", "sheet", "exercises", "exam"]);
 
 export const storage = {
   async getUserByEmail(email: string): Promise<User | undefined> {
-    return one(`select id, email, name, password_hash as "passwordHash" from public.users where email = $1`, [email]);
+    return one(`select id, email, name, password_hash as "passwordHash", ai_consent_at as "aiConsentAt", ai_consent_version as "aiConsentVersion" from public.users where email = $1`, [email]);
   },
   async getUser(id: number): Promise<User | undefined> {
-    return one(`select id, email, name, password_hash as "passwordHash" from public.users where id = $1`, [id]);
+    return one(`select id, email, name, password_hash as "passwordHash", ai_consent_at as "aiConsentAt", ai_consent_version as "aiConsentVersion" from public.users where id = $1`, [id]);
   },
   async createUser(data: { email: string; name: string; passwordHash: string }): Promise<User> {
     return (await one(
       `insert into public.users (email, name, password_hash) values ($1, $2, $3)
-       returning id, email, name, password_hash as "passwordHash"`,
+       returning id, email, name, password_hash as "passwordHash", ai_consent_at as "aiConsentAt", ai_consent_version as "aiConsentVersion"`,
       [data.email, data.name, data.passwordHash],
     ))!;
   },
@@ -114,13 +114,36 @@ export const storage = {
   },
   async getSessionUser(token: string): Promise<User | undefined> {
     return one(
-      `select u.id, u.email, u.name, u.password_hash as "passwordHash"
+      `select u.id, u.email, u.name, u.password_hash as "passwordHash", u.ai_consent_at as "aiConsentAt", u.ai_consent_version as "aiConsentVersion"
        from public.sessions s join public.users u on u.id = s.user_id where s.token = $1`,
       [token],
     );
   },
   async deleteSession(token: string) {
     await q(`delete from public.sessions where token = $1`, [token]);
+  },
+  async setConsent(userId: number, version: number | null) {
+    await q(
+      `update public.users set ai_consent_at = $2, ai_consent_version = $3, age_confirmed = $4 where id = $1`,
+      [userId, version ? Date.now() : null, version, !!version],
+    );
+  },
+  async listCourseIds(ownerId: number): Promise<number[]> {
+    return (await q<{ id: number }>(`select id from public.courses where owner_id = $1`, [ownerId])).map((r) => r.id);
+  },
+  async deleteUser(userId: number) {
+    await q(`delete from public.users where id = $1`, [userId]);
+  },
+  async createHandoff(code: string, userId: number, expiresAt: number) {
+    await q(`delete from public.auth_handoffs where expires_at < $1`, [Date.now()]);
+    await q(`insert into public.auth_handoffs (code, user_id, expires_at) values ($1, $2, $3)`, [code, userId, expiresAt]);
+  },
+  async redeemHandoff(code: string): Promise<number | undefined> {
+    const r = await one<{ user_id: number }>(
+      `delete from public.auth_handoffs where code = $1 and expires_at > $2 returning user_id`,
+      [code, Date.now()],
+    );
+    return r?.user_id;
   },
 
   // ---------- Matières ----------

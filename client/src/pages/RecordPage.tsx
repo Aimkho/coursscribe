@@ -25,7 +25,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { useRecorder, formatDuration } from "@/lib/useRecorder";
-import { apiRequest, apiUpload, apiTranscribe, apiTranscribeFile, queryClient } from "@/lib/queryClient";
+import { apiRequest, apiUploadSessionAudio, apiTranscribe, apiTranscribeFile, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 
@@ -276,7 +276,7 @@ export default function RecordPage({ continueId, subjectId: presetSubject }: { c
       }
       if (blob && blob.size > 0 && sessionRef.current) {
         try {
-          await apiUpload(`/api/courses/${id}/sessions/${sessionRef.current.id}/audio`, blob);
+          await apiUploadSessionAudio(id, sessionRef.current.id, blob);
         } catch (e: any) {
           toast({ title: "Audio non sauvegardé", description: e.message, variant: "destructive" });
         }
@@ -308,8 +308,8 @@ export default function RecordPage({ continueId, subjectId: presetSubject }: { c
       toast({ title: "Format non pris en charge", description: "Importe un fichier audio : mp3, m4a, wav, webm, ogg…" });
       return;
     }
-    if (file.size > 400 * 1024 * 1024) {
-      toast({ title: "Fichier trop volumineux", description: "400 Mo maximum." });
+    if (file.size > 500 * 1024 * 1024) {
+      toast({ title: "Fichier trop volumineux", description: "500 Mo maximum." });
       return;
     }
     importCancel.current = { cancelled: false };

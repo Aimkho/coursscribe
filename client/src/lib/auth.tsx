@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import type { PublicUser } from "@shared/schema";
-import { apiRequest, queryClient, setAuthToken, setUnauthorizedHandler } from "./queryClient";
+import { apiRequest, getAuthToken, queryClient, setAuthToken, setConsentRequiredHandler, setUnauthorizedHandler } from "./queryClient";
 
 type AuthCtx = {
   user: PublicUser | null;
@@ -9,13 +9,25 @@ type AuthCtx = {
   login: (email: string, password: string) => Promise<void>;
   register: (name: string, email: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
+  /** Met à jour l'utilisateur (après consentement ou retrait). */
+  setUser: (u: PublicUser | null) => void;
 };
 
 const Ctx = createContext<AuthCtx | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<PublicUser | null>(null);
-  const [ready, setReady] = useState(() => !/[?&]handoff=/.test(window.location.hash));
+  const [ready, setReady] = useState(() => !/[?&]handoff=/.test(window.location.hash) && !getAuthToken());
+
+  // Session conservée dans le navigateur : on la recharge au démarrage.
+  useEffect(() => {
+    if (/[?&]handoff=/.test(window.location.hash) || !getAuthToken()) return;
+    apiRequest("GET", "/api/auth/me")
+      .then((r) => r.json())
+      .then((u) => setUser(u))
+      .catch(() => setAuthToken(null))
+      .finally(() => setReady(true));
+  }, []);
 
   // Ouverture dans un nouvel onglet : un code à usage unique (2 min) remplace la reconnexion.
   useEffect(() => {
@@ -39,6 +51,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setUser(null);
       queryClient.clear();
     });
+    // Le serveur demande le consentement (retiré ailleurs, ou nouvelle version du texte)
+    setConsentRequiredHandler(() => setUser((u) => (u ? { ...u, aiConsent: null } : u)));
   }, []);
 
   async function finish(res: Response) {
@@ -51,6 +65,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const value: AuthCtx = {
     user,
     ready,
+    setUser,
     login: async (email, password) => finish(await apiRequest("POST", "/api/auth/login", { email, password })),
     register: async (name, email, password) =>
       finish(await apiRequest("POST", "/api/auth/register", { name, email, password })),

@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { Link, useLocation } from "wouter";
-import { Globe2, LogOut, Mic, LayoutGrid } from "lucide-react";
+import { Globe2, LogOut, Mic, LayoutGrid, ShieldCheck } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { cn } from "@/lib/utils";
 
@@ -75,6 +75,18 @@ export function AppShell({ children }: { children: ReactNode }) {
               <p className="truncate text-sm font-semibold" data-testid="text-username">{user?.name}</p>
               <p className="truncate text-xs text-muted-foreground">{user?.email}</p>
             </div>
+            <Link
+              href="/privacy"
+              data-testid="link-privacy"
+              className={cn(
+                "grid h-8 w-8 place-items-center rounded-lg hover:bg-muted hover:text-foreground",
+                loc === "/privacy" ? "text-primary" : "text-muted-foreground",
+              )}
+              aria-label="Confidentialité"
+              title="Confidentialité et données"
+            >
+              <ShieldCheck className="h-4 w-4" />
+            </Link>
             <button
               onClick={logout}
               data-testid="button-logout"
@@ -91,9 +103,19 @@ export function AppShell({ children }: { children: ReactNode }) {
       {/* En-tête mobile */}
       <header className="sticky top-0 z-30 flex h-14 items-center justify-between border-b border-border bg-background/90 px-4 backdrop-blur lg:hidden">
         <BrandMark />
-        <button onClick={logout} className="text-sm font-medium text-muted-foreground" data-testid="button-logout-mobile">
-          Déconnexion
-        </button>
+        <div className="flex items-center gap-1">
+          <Link
+            href="/privacy"
+            className={cn("grid h-9 w-9 place-items-center rounded-lg", loc === "/privacy" ? "text-primary" : "text-muted-foreground")}
+            aria-label="Confidentialité et données"
+            data-testid="link-privacy-mobile"
+          >
+            <ShieldCheck className="h-5 w-5" />
+          </Link>
+          <button onClick={logout} className="px-1 text-sm font-medium text-muted-foreground" data-testid="button-logout-mobile">
+            Déconnexion
+          </button>
+        </div>
       </header>
 
       <main className="pb-[calc(6rem+env(safe-area-inset-bottom))] lg:pb-10 lg:pl-64">

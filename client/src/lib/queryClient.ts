@@ -2,11 +2,30 @@ import { QueryClient, QueryFunction } from "@tanstack/react-query";
 
 export const API_BASE = "__PORT_5000__".startsWith("__") ? "" : "__PORT_5000__";
 
-// Le jeton de session est conservé en mémoire (le stockage navigateur est bloqué dans l'aperçu).
-let authToken: string | null = null;
+// Jeton de session : en mémoire, et dans le navigateur quand c'est possible
+// (sur un vrai domaine, la session survit au rechargement ; dans l'aperçu intégré le stockage est bloqué).
+const TOKEN_KEY = "cs_token";
+function readStoredToken(): string | null {
+  try {
+    return window.localStorage.getItem(TOKEN_KEY);
+  } catch {
+    return null;
+  }
+}
+let authToken: string | null = readStoredToken();
 let onUnauthorized: (() => void) | null = null;
+let onConsentRequired: (() => void) | null = null;
 export function setAuthToken(t: string | null) {
   authToken = t;
+  try {
+    if (t) window.localStorage.setItem(TOKEN_KEY, t);
+    else window.localStorage.removeItem(TOKEN_KEY);
+  } catch {
+    /* stockage indisponible */
+  }
+}
+export function setConsentRequiredHandler(fn: () => void) {
+  onConsentRequired = fn;
 }
 export function getAuthToken() {
   return authToken;
@@ -22,6 +41,7 @@ async function throwIfResNotOk(res: Response) {
     try {
       const body = await res.json();
       message = body.message || message;
+      if (res.status === 403 && body.code === "consent_required" && onConsentRequired) onConsentRequired();
     } catch {
       /* corps non JSON */
     }
@@ -89,29 +109,129 @@ export function audioUrl(courseId: number, download = false, sessionId?: number)
   return `${API_BASE}${base}?token=${authToken ?? ""}${download ? "&download=1" : ""}`;
 }
 
-/** Transcrit un fichier audio complet (enregistrement du téléphone, dictaphone…). */
+/**
+ * Sauvegarde l'audio d'une séance : le navigateur envoie le fichier directement
+ * dans le stockage Supabase (URL signée), sans passer par le serveur.
+ */
+export async function apiUploadSessionAudio(courseId: number, sessionId: number, blob: Blob) {
+  const r = await apiRequest("POST", `/api/courses/${courseId}/sessions/${sessionId}/audio-upload`);
+  const { url } = await r.json();
+  const put = await fetch(url, {
+    method: "PUT",
+    headers: { "Content-Type": (blob.type || "audio/webm").split(";")[0], "x-upsert": "true" },
+    body: blob,
+  });
+  if (!put.ok) throw new Error(`Envoi de l'audio impossible (${put.status}).`);
+  await apiRequest("POST", `/api/courses/${courseId}/sessions/${sessionId}/audio-done`);
+}
+
+/** Durée d'un fichier audio lue par le navigateur (0 si inconnue). */
+function readDuration(file: Blob): Promise<number> {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(file);
+    const a = document.createElement("audio");
+    let done = false;
+    const end = (d: number) => {
+      if (done) return;
+      done = true;
+      URL.revokeObjectURL(url);
+      resolve(Number.isFinite(d) && d > 0 ? d : 0);
+    };
+    a.preload = "metadata";
+    a.onloadedmetadata = () => {
+      if (Number.isFinite(a.duration) && a.duration > 0) return end(a.duration);
+      // WebM sans durée : on force la lecture jusqu'à la fin pour l'obtenir.
+      a.currentTime = 1e7;
+      a.ontimeupdate = () => end(a.duration);
+    };
+    a.onerror = () => end(0);
+    setTimeout(() => end(a.duration), 15000);
+    a.src = url;
+  });
+}
+
+const WINDOW_SEC = 60 * 60; // Google facture le fichier entier à chaque requête : une seule requête par heure d'audio
+
+/**
+ * Transcrit un fichier audio complet (enregistrement du téléphone, dictaphone…) :
+ * envoi par morceaux de 4 Mo vers l'IA, puis transcription fenêtre par fenêtre.
+ */
 export async function apiTranscribeFile(
-  file: Blob,
+  file: Blob & { name?: string },
   context: string,
   onProgress: (p: { done: number; total: number; text: string }) => void,
   signal?: { cancelled: boolean },
 ): Promise<{ text: string; durationSec: number }> {
-  const res = await fetch(`${API_BASE}/api/transcribe-file?context=${encodeURIComponent(context.slice(0, 300))}`, {
-    method: "POST",
-    headers: headers({ "Content-Type": file.type || "application/octet-stream" }),
-    body: file,
-  });
-  await throwIfResNotOk(res);
-  const { jobId } = await res.json();
-  for (;;) {
-    await new Promise((r) => setTimeout(r, 1500));
+  const check = () => {
     if (signal?.cancelled) throw new Error("Import annulé.");
-    const r = await fetch(`${API_BASE}/api/transcribe-file/${jobId}`, { headers: headers() });
-    await throwIfResNotOk(r);
-    const j = await r.json();
-    onProgress({ done: j.done, total: j.total, text: j.text });
-    if (j.status === "done") return { text: j.text, durationSec: j.durationSec };
-    if (j.status === "error") throw new Error(j.error || "La transcription du fichier a échoué.");
+  };
+  const durationSec = await readDuration(file);
+  // Estimation si le navigateur ne lit pas la durée (~1 Mo par minute en mp3 128 kbit/s)
+  const dur = durationSec || Math.max(60, (file.size / (1024 * 1024)) * 60);
+  const windows: [number, number][] = [];
+  for (let t = 0; t < dur; t += WINDOW_SEC) windows.push([t, Math.min(dur, t + WINDOW_SEC)]);
+  const uploadSteps = Math.ceil(file.size / (4 * 1024 * 1024));
+  const total = uploadSteps + windows.length;
+  let done = 0;
+  onProgress({ done, total, text: "" });
+
+  const mime = (file.type || "audio/mpeg").split(";")[0];
+  const start = await apiRequest("POST", "/api/import/start", { size: file.size, mime, name: file.name || "cours" });
+  const { id, chunkSize } = (await start.json()) as { id: number; chunkSize: number };
+  try {
+    for (let offset = 0; offset < file.size; offset += chunkSize) {
+      check();
+      const chunk = file.slice(offset, Math.min(file.size, offset + chunkSize));
+      let ok = false;
+      for (let attempt = 0; attempt < 3 && !ok; attempt++) {
+        const res = await fetch(`${API_BASE}/api/import/${id}/chunk?offset=${offset}`, {
+          method: "PUT",
+          headers: headers({ "Content-Type": "application/octet-stream" }),
+          body: chunk,
+        });
+        if (res.ok) ok = true;
+        else if (attempt === 2) await throwIfResNotOk(res);
+      }
+      onProgress({ done: ++done, total, text: "" });
+    }
+    // Le fichier est analysé par l'IA (quelques secondes)
+    for (let i = 0; i < 60; i++) {
+      check();
+      const st = await (await apiRequest("GET", `/api/import/${id}/status`)).json();
+      if (st.state === "ACTIVE") break;
+      if (st.state === "FAILED") throw new Error("Format audio non reconnu.");
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+    const out: string[] = new Array(windows.length).fill("");
+    let next = 0;
+    let failed = 0;
+    const worker = async () => {
+      while (next < windows.length) {
+        check();
+        const i = next++;
+        const [s, e] = windows[i];
+        let text = "";
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            const r = await apiRequest("POST", `/api/import/${id}/part`, { start: s, end: e, duration: dur, context });
+            text = String((await r.json()).text || "");
+            break;
+          } catch (err) {
+            if (attempt === 1) failed++;
+            else await new Promise((r) => setTimeout(r, 3000));
+          }
+        }
+        out[i] = text;
+        onProgress({ done: ++done, total, text: out.filter(Boolean).join(" ") });
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(3, windows.length) }, worker));
+    check();
+    const text = out.filter(Boolean).join("\n\n");
+    if (failed && !text) throw new Error("La transcription du fichier a échoué. Réessaie.");
+    return { text, durationSec: Math.round(durationSec) };
+  } finally {
+    fetch(`${API_BASE}/api/import/${id}`, { method: "DELETE", headers: headers() }).catch(() => {});
   }
 }
 

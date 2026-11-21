@@ -16,20 +16,26 @@ loadEnvFile(".env.db");
 // bigint -> number (identifiants et horodatages en ms restent < 2^53)
 pg.types.setTypeParser(20, (v) => Number(v));
 
-const { DB_ROLE, DB_PASSWORD, DB_HOST, DB_PORT, SUPABASE_REF } = process.env;
-if (!DB_PASSWORD || !DB_HOST || !SUPABASE_REF) {
-  throw new Error("Configuration Supabase manquante (.env.db).");
+const { DATABASE_URL, DB_ROLE, DB_PASSWORD, DB_HOST, DB_PORT, SUPABASE_REF } = process.env;
+if (!DATABASE_URL && (!DB_PASSWORD || !DB_HOST || !SUPABASE_REF)) {
+  throw new Error("Configuration base de données manquante : définis DATABASE_URL (ou le fichier .env.db).");
 }
 
+// Sur Vercel : DATABASE_URL = chaîne « Transaction pooler » de Supabase (port 6543).
+const serverless = !!process.env.VERCEL;
 export const pool = new pg.Pool({
-  host: DB_HOST,
-  port: Number(DB_PORT || 5432),
-  user: `${DB_ROLE || "coursscribe_app"}.${SUPABASE_REF}`,
-  password: DB_PASSWORD,
-  database: "postgres",
+  ...(DATABASE_URL
+    ? { connectionString: DATABASE_URL.replace(/[?&]sslmode=[^&]*/g, "") }
+    : {
+        host: DB_HOST,
+        port: Number(DB_PORT || 5432),
+        user: `${DB_ROLE || "coursscribe_app"}.${SUPABASE_REF}`,
+        password: DB_PASSWORD,
+        database: "postgres",
+      }),
   ssl: { rejectUnauthorized: false },
-  max: 8,
-  idleTimeoutMillis: 30_000,
+  max: serverless ? 3 : 8,
+  idleTimeoutMillis: serverless ? 10_000 : 30_000,
   connectionTimeoutMillis: 15_000,
 });
 pool.on("error", (e) => console.error("pg pool error", e.message));

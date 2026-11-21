@@ -10,3 +10,8 @@
 8. Export PDF / Word / PowerPoint, impression.
 9. Publication dans la bibliothèque, consultation publique (`/public/:id`).
 10. Examen blanc noté sur 20 (correction IA des questions rédigées).
+11. Consentement IA : à la première connexion (ou après retrait), écran obligatoire avec 3 cases (envoi à Google Gemini, 18 ans ou plus, accord de l'enseignant). Sans consentement, l'API renvoie 403 `consent_required` sur transcription, import, génération et correction.
+12. Confidentialité (`/privacy`, bouclier dans la barre latérale ou l'en-tête mobile) : retrait du consentement, export JSON des données, suppression du compte (mot de passe demandé, audio compris).
+13. Audio des séances : envoyé directement dans le stockage Supabase privé (URL signée), lu via `/api/courses/:id/sessions/:sid/audio` (redirection vers une URL signée temporaire).
+14. Import audio long : découpé en morceaux de 4 Mo → fichier temporaire Gemini → transcription par blocs d'1 h → fichier effacé chez Google.
+15. Coûts IA : chaque appel est enregistré dans `ai_usage` (jetons d'entrée/sortie, secondes d'audio).
