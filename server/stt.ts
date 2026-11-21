@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import os from "node:os";
+import { execFile } from "node:child_process";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import path from "node:path";
 import readline from "node:readline";
@@ -73,4 +76,89 @@ export function cleanTranscript(t: string) {
     .replace(/\[(silence|inaudible|musique|bruit)[^\]]*\]/gi, "")
     .replace(/\s{2,}/g, " ")
     .trim();
+}
+
+// ---------- Import d'un fichier audio complet ----------
+
+type FileJob = {
+  id: string;
+  userId: number;
+  status: "running" | "done" | "error";
+  done: number;
+  total: number;
+  durationSec: number;
+  text: string;
+  error?: string;
+  createdAt: number;
+};
+const jobs = new Map<string, FileJob>();
+const SEGMENT_SEC = 50;
+
+function run(cmd: string, args: string[]) {
+  return new Promise<string>((resolve, reject) =>
+    execFile(cmd, args, { maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) =>
+      err ? reject(new Error(String(stderr || err.message).slice(-300))) : resolve(String(stdout)),
+    ),
+  );
+}
+
+export function startFileJob(userId: number, data: Buffer, mime: string, context: string) {
+  const id = randomBytes(10).toString("hex");
+  const job: FileJob = { id, userId, status: "running", done: 0, total: 0, durationSec: 0, text: "", createdAt: Date.now() };
+  jobs.set(id, job);
+  // Nettoyage des anciennes tâches (1 h)
+  jobs.forEach((j, k) => {
+    if (Date.now() - j.createdAt > 3600_000) jobs.delete(k);
+  });
+  processFile(job, data, mime, context).catch((e) => {
+    job.status = "error";
+    job.error = e?.message?.includes("Invalid data") ? "Format audio non reconnu." : "La transcription du fichier a échoué.";
+    console.error("file job", e?.message);
+  });
+  return id;
+}
+
+async function processFile(job: FileJob, data: Buffer, _mime: string, context: string) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cs-audio-"));
+  try {
+    const input = path.join(dir, "input");
+    fs.writeFileSync(input, data);
+    const dur = Number((await run("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", input])).trim()) || 0;
+    job.durationSec = Math.round(dur);
+    if (dur > 4 * 3600) throw new Error("Fichier trop long (4 h maximum).");
+    await run("ffmpeg", [
+      "-v", "error", "-i", input, "-vn", "-ac", "1", "-ar", "16000", "-b:a", "48k",
+      "-f", "segment", "-segment_time", String(SEGMENT_SEC), "-reset_timestamps", "1", path.join(dir, "seg%04d.mp3"),
+    ]);
+    const segs = fs.readdirSync(dir).filter((f) => f.startsWith("seg")).sort();
+    job.total = segs.length;
+    const out: string[] = new Array(segs.length).fill("");
+    let next = 0;
+    const worker = async () => {
+      while (next < segs.length) {
+        const i = next++;
+        const buf = fs.readFileSync(path.join(dir, segs[i]));
+        try {
+          out[i] = cleanTranscript(await transcribeAudio(buf, "audio/mp3", context));
+        } catch {
+          out[i] = "";
+        }
+        job.done++;
+        // Texte partiel affiché au fil de l'eau (préfixe contigu)
+        job.text = out.filter(Boolean).join(" ");
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(4, segs.length) }, worker));
+    job.text = out.filter(Boolean).join(" ");
+    job.status = "done";
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+export function getFileJob(id: string, userId: number) {
+  const j = jobs.get(id);
+  if (!j || j.userId !== userId) return undefined;
+  const { userId: _u, ...rest } = j;
+  return rest;
 }

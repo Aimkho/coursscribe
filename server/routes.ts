@@ -5,9 +5,9 @@ import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { storage, toCourse, toSummary } from "./storage";
-import { registerSchema, loginSchema, courseInputSchema, coursePatchSchema } from "@shared/schema";
+import { registerSchema, loginSchema, courseInputSchema, coursePatchSchema, subjectInputSchema } from "@shared/schema";
 import type { User, Exam, ExamGrade } from "@shared/schema";
-import { transcribeAudio, cleanTranscript } from "./stt";
+import { transcribeAudio, cleanTranscript, startFileJob, getFileJob } from "./stt";
 import { buildBlocks, ALL_PARTS, safeFileName, type ExportPart } from "./export/blocks";
 import { renderPdf } from "./export/pdf";
 import { renderDocx } from "./export/docx";
@@ -31,15 +31,35 @@ function verifyPassword(pw: string, stored: string) {
 
 type AuthedRequest = Request & { user?: User; token?: string };
 
-function auth(req: AuthedRequest, res: Response, next: NextFunction) {
+async function auth(req: AuthedRequest, res: Response, next: NextFunction) {
   const header = req.headers.authorization || "";
   const token = header.startsWith("Bearer ") ? header.slice(7) : (req.query.token as string) || "";
-  const user = token ? storage.getSessionUser(token) : undefined;
-  if (!user) return res.status(401).json({ message: "Session expirée. Reconnecte-toi." });
-  req.user = user;
-  req.token = token;
-  next();
+  try {
+    const user = token ? await storage.getSessionUser(token) : undefined;
+    if (!user) return res.status(401).json({ message: "Session expirée. Reconnecte-toi." });
+    req.user = user;
+    req.token = token;
+    next();
+  } catch (e: any) {
+    console.error("auth db error", e?.message);
+    res.status(503).json({ message: "Base de données momentanément injoignable. Réessaie dans un instant." });
+  }
 }
+
+// Enveloppe async : toute erreur devient une réponse 500 propre.
+const h =
+  (fn: (req: AuthedRequest, res: Response) => Promise<any>) =>
+  (req: AuthedRequest, res: Response) =>
+    fn(req, res).catch((e: any) => {
+      console.error("route error", req.method, req.path, e?.message);
+      fs.appendFileSync("gen-errors.log", `${new Date().toISOString()} ${req.method} ${req.path} ${e?.stack || e?.message}\n`);
+      if (!res.headersSent) res.status(500).json({ message: "Erreur serveur. Réessaie." });
+    });
+
+function audioPath(courseId: number, sessionId?: number) {
+  return path.join(UPLOAD_DIR, sessionId ? `${courseId}-s${sessionId}.webm` : `${courseId}.webm`);
+}
+const wc = (t: string) => (t.trim() ? t.trim().split(/\s+/).length : 0);
 
 function publicUser(u: User) {
   return { id: u.id, name: u.name, email: u.email };
@@ -119,102 +139,237 @@ function normalizeExam(x: any): Exam {
 }
 
 const running = new Set<string>();
+const handoffs = new Map<string, { userId: number; exp: number }>();
 
 export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
   // ---------- Auth ----------
-  app.post("/api/auth/register", (req, res) => {
+  app.post("/api/auth/register", h(async (req, res) => {
     const parsed = registerSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ message: zodMessage(parsed.error) });
     const { name, email, password } = parsed.data;
-    if (storage.getUserByEmail(email)) return res.status(409).json({ message: "Un compte existe déjà avec cette adresse e-mail." });
-    const user = storage.createUser({ name, email, passwordHash: hashPassword(password) });
+    if (await storage.getUserByEmail(email)) return res.status(409).json({ message: "Un compte existe déjà avec cette adresse e-mail." });
+    const user = await storage.createUser({ name, email, passwordHash: hashPassword(password) });
     const token = randomBytes(32).toString("hex");
-    storage.createSession(token, user.id);
+    await storage.createSession(token, user.id);
     res.json({ token, user: publicUser(user) });
-  });
+  }));
 
-  app.post("/api/auth/login", (req, res) => {
+  app.post("/api/auth/login", h(async (req, res) => {
     const parsed = loginSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ message: zodMessage(parsed.error) });
-    const user = storage.getUserByEmail(parsed.data.email);
+    const user = await storage.getUserByEmail(parsed.data.email);
     if (!user || !verifyPassword(parsed.data.password, user.passwordHash))
       return res.status(401).json({ message: "E-mail ou mot de passe incorrect." });
     const token = randomBytes(32).toString("hex");
-    storage.createSession(token, user.id);
+    await storage.createSession(token, user.id);
     res.json({ token, user: publicUser(user) });
-  });
+  }));
 
-  app.post("/api/auth/logout", auth, (req: AuthedRequest, res) => {
-    storage.deleteSession(req.token!);
+  app.post("/api/auth/logout", auth, h(async (req, res) => {
+    await storage.deleteSession(req.token!);
     res.json({ ok: true });
+  }));
+
+  // Transfert de session vers un nouvel onglet (code à usage unique, 2 minutes).
+  app.post("/api/auth/handoff", auth, (req: AuthedRequest, res) => {
+    const code = randomBytes(24).toString("hex");
+    handoffs.set(code, { userId: req.user!.id, exp: Date.now() + 120_000 });
+    res.json({ code });
   });
+  app.post("/api/auth/handoff/redeem", h(async (req, res) => {
+    const code = String(req.body?.code || "");
+    const hnd = handoffs.get(code);
+    handoffs.delete(code);
+    if (!hnd || hnd.exp < Date.now()) return res.status(401).json({ message: "Lien expiré. Reconnecte-toi." });
+    const user = await storage.getUser(hnd.userId);
+    if (!user) return res.status(401).json({ message: "Compte introuvable." });
+    const token = randomBytes(32).toString("hex");
+    await storage.createSession(token, user.id);
+    res.json({ token, user: publicUser(user) });
+  }));
 
   app.get("/api/auth/me", auth, (req: AuthedRequest, res) => res.json(publicUser(req.user!)));
 
+  // ---------- Matières ----------
+  app.get("/api/subjects", auth, h(async (req, res) => {
+    res.json(await storage.listSubjects(req.user!.id));
+  }));
+
+  app.post("/api/subjects", auth, h(async (req, res) => {
+    const parsed = subjectInputSchema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ message: zodMessage(parsed.error) });
+    res.json(await storage.findOrCreateSubject(req.user!.id, parsed.data.name, parsed.data.level));
+  }));
+
+  app.patch("/api/subjects/:id", auth, h(async (req, res) => {
+    const parsed = subjectInputSchema.partial().safeParse(req.body);
+    if (!parsed.success || !parsed.data.name) return res.status(400).json({ message: "Nom de la matière requis" });
+    const r = await storage.renameSubject(Number(req.params.id), req.user!.id, parsed.data.name, parsed.data.level);
+    if (!r) return res.status(404).json({ message: "Matière introuvable." });
+    res.json({ ok: true });
+  }));
+
+  app.delete("/api/subjects/:id", auth, h(async (req, res) => {
+    const ok = await storage.deleteSubject(Number(req.params.id), req.user!.id);
+    if (!ok) return res.status(404).json({ message: "Matière introuvable." });
+    res.json({ ok: true });
+  }));
+
+  app.get("/api/subjects/:id/next-chapter", auth, h(async (req, res) => {
+    const s = await storage.getSubject(Number(req.params.id), req.user!.id);
+    if (!s) return res.status(404).json({ message: "Matière introuvable." });
+    res.json({ next: await storage.nextChapterNumber(s.id) });
+  }));
+
   // ---------- Cours ----------
-  app.get("/api/courses", auth, (req: AuthedRequest, res) => {
-    res.json(storage.listMyCourses(req.user!.id).map((c) => toSummary(c, req.user!.id)));
-  });
+  app.get("/api/courses", auth, h(async (req, res) => {
+    res.json((await storage.listMyCourses(req.user!.id)).map((c) => toSummary(c, req.user!.id)));
+  }));
 
-  app.get("/api/library", auth, (req: AuthedRequest, res) => {
-    res.json(storage.listPublicCourses().map((c) => toSummary(c, req.user!.id)));
-  });
+  app.get("/api/library", auth, h(async (req, res) => {
+    res.json((await storage.listPublicCourses()).map((c) => toSummary(c, req.user!.id)));
+  }));
 
-  app.post("/api/courses", auth, (req: AuthedRequest, res) => {
+  /** Résout la matière : id existant (appartenant à l'utilisateur) ou nom libre (créée si besoin). */
+  async function resolveSubject(userId: number, subjectId: number | null | undefined, name: string | undefined, level: string) {
+    if (subjectId) {
+      const s = await storage.getSubject(subjectId, userId);
+      if (s) return s;
+    }
+    if (name && name.trim()) return storage.findOrCreateSubject(userId, name, level);
+    return null;
+  }
+
+  app.post("/api/courses", auth, h(async (req, res) => {
     const parsed = courseInputSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ message: zodMessage(parsed.error) });
-    const row = storage.createCourse({
-      ...parsed.data,
+    const d = parsed.data;
+    const subj = await resolveSubject(req.user!.id, d.subjectId, d.subject, d.level);
+    const chapter = subj ? d.chapterNumber ?? (await storage.nextChapterNumber(subj.id)) : d.chapterNumber ?? null;
+    const row = await storage.createCourse({
       ownerId: req.user!.id,
-      isPublic: 0,
-      hasAudio: 0,
-      createdAt: Date.now(),
-      notes: null,
-      sheet: null,
-      exercises: null,
-      exam: null,
+      title: d.title,
+      subject: subj?.name ?? d.subject,
+      level: d.level || subj?.level || "",
+      transcript: d.transcript,
+      durationSec: d.durationSec,
+      subjectId: subj?.id ?? null,
+      chapterNumber: chapter,
     });
-    res.json(toCourse(row, req.user!.id));
-  });
+    res.json(await toCourse(row, req.user!.id));
+  }));
 
-  function viewable(req: AuthedRequest, res: Response) {
-    const row = storage.getCourse(Number(req.params.id));
+  async function viewable(req: AuthedRequest, res: Response) {
+    const row = await storage.getCourse(Number(req.params.id));
     if (!row || (row.ownerId !== req.user!.id && !row.isPublic)) {
       res.status(404).json({ message: "Cours introuvable ou privé." });
       return undefined;
     }
     return row;
   }
+  async function owned(req: AuthedRequest, res: Response) {
+    const row = await storage.getCourse(Number(req.params.id));
+    if (!row || row.ownerId !== req.user!.id) {
+      res.status(404).json({ message: "Cours introuvable." });
+      return undefined;
+    }
+    return row;
+  }
 
-  app.get("/api/courses/:id", auth, (req: AuthedRequest, res) => {
-    const row = viewable(req, res);
-    if (row) res.json(toCourse(row, req.user!.id));
-  });
+  app.get("/api/courses/:id", auth, h(async (req, res) => {
+    const row = await viewable(req, res);
+    if (row) res.json(await toCourse(row, req.user!.id));
+  }));
 
-  app.patch("/api/courses/:id", auth, (req: AuthedRequest, res) => {
+  app.patch("/api/courses/:id", auth, h(async (req, res) => {
     const parsed = coursePatchSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ message: zodMessage(parsed.error) });
-    const { isPublic, ...rest } = parsed.data;
-    const patch: any = { ...rest };
-    if (isPublic !== undefined) patch.isPublic = isPublic ? 1 : 0;
-    const row = storage.updateCourse(Number(req.params.id), req.user!.id, patch);
-    if (!row) return res.status(404).json({ message: "Cours introuvable." });
-    res.json(toCourse(row, req.user!.id));
-  });
+    const row = await owned(req, res);
+    if (!row) return;
+    const patch: Record<string, any> = { ...parsed.data };
+    if (parsed.data.subjectId !== undefined || parsed.data.subject !== undefined) {
+      if (parsed.data.subjectId === null && !parsed.data.subject) {
+        patch.subjectId = null;
+      } else {
+        const subj = await resolveSubject(req.user!.id, parsed.data.subjectId, parsed.data.subject, parsed.data.level ?? row.level);
+        patch.subjectId = subj?.id ?? null;
+        patch.subject = subj?.name ?? parsed.data.subject ?? "";
+        if (subj && subj.id !== row.subjectId && parsed.data.chapterNumber === undefined)
+          patch.chapterNumber = await storage.nextChapterNumber(subj.id);
+      }
+    }
+    const updated = await storage.updateCourse(row.id, req.user!.id, patch);
+    if (!updated) return res.status(404).json({ message: "Cours introuvable." });
+    res.json(await toCourse(updated, req.user!.id));
+  }));
 
-  app.delete("/api/courses/:id", auth, (req: AuthedRequest, res) => {
+  app.delete("/api/courses/:id", auth, h(async (req, res) => {
     const id = Number(req.params.id);
-    const r = storage.deleteCourse(id, req.user!.id);
-    if (!r.changes) return res.status(404).json({ message: "Cours introuvable." });
-    fs.rmSync(path.join(UPLOAD_DIR, `${id}.webm`), { force: true });
+    const sessions = await storage.listCourseSessions(id).catch(() => []);
+    const ok = await storage.deleteCourse(id, req.user!.id);
+    if (!ok) return res.status(404).json({ message: "Cours introuvable." });
+    fs.rmSync(audioPath(id), { force: true });
+    for (const s of sessions) fs.rmSync(audioPath(id, s.id), { force: true });
     res.json({ ok: true });
-  });
+  }));
+
+  // ---------- Séances (un cours peut s'étaler sur plusieurs jours) ----------
+  app.post("/api/courses/:id/sessions", auth, h(async (req, res) => {
+    const row = await owned(req, res);
+    if (!row) return;
+    const session = await storage.createCourseSession(row.id, Date.now());
+    if (row.status === "termine") await storage.updateCourse(row.id, req.user!.id, { status: "en_cours" });
+    res.json(session);
+  }));
+
+  // Sauvegarde (automatique ou finale) d'une séance : texte complet du cours + durée de la séance.
+  app.put("/api/courses/:id/sessions/:sid", auth, h(async (req, res) => {
+    const row = await owned(req, res);
+    if (!row) return;
+    const sid = Number(req.params.sid);
+    const transcript = typeof req.body?.transcript === "string" ? req.body.transcript.slice(0, 400000) : undefined;
+    const durationSec = Math.max(0, Math.min(43200, Math.round(Number(req.body?.durationSec) || 0)));
+    const sessionWords = Math.max(0, Math.round(Number(req.body?.wordCount) || 0));
+    const session = await storage.updateCourseSession(row.id, sid, { durationSec, wordCount: sessionWords });
+    if (!session) return res.status(404).json({ message: "Séance introuvable." });
+    if (transcript !== undefined && transcript !== row.transcript) await storage.updateCourse(row.id, req.user!.id, { transcript });
+    await storage.recomputeDuration(row.id);
+    res.json({ ok: true, savedAt: Date.now(), session });
+  }));
+
+  app.post(
+    "/api/courses/:id/sessions/:sid/audio",
+    auth,
+    express.raw({ type: () => true, limit: "300mb" }),
+    h(async (req, res) => {
+      const row = await owned(req, res);
+      if (!row) return;
+      const sid = Number(req.params.sid);
+      const s = await storage.getCourseSession(row.id, sid);
+      if (!s) return res.status(404).json({ message: "Séance introuvable." });
+      if (!Buffer.isBuffer(req.body) || req.body.length === 0) return res.status(400).json({ message: "Fichier audio vide." });
+      fs.writeFileSync(audioPath(row.id, sid), req.body);
+      await storage.updateCourseSession(row.id, sid, { hasAudio: true });
+      await storage.updateCourse(row.id, req.user!.id, { hasAudio: true, transcriptUpdatedAt: row.transcriptUpdatedAt });
+      res.json({ ok: true, bytes: req.body.length });
+    }),
+  );
+
+  app.get("/api/courses/:id/sessions/:sid/audio", auth, h(async (req, res) => {
+    const row = await owned(req, res);
+    if (!row) return;
+    const file = audioPath(row.id, Number(req.params.sid));
+    if (!fs.existsSync(file)) return res.status(404).end();
+    res.setHeader("Content-Type", "audio/webm");
+    if (req.query.download) res.setHeader("Content-Disposition", `attachment; filename="cours-${row.id}-seance-${req.params.sid}.webm"`);
+    fs.createReadStream(file).pipe(res);
+  }));
 
   // ---------- Exports PDF / Word / PowerPoint ----------
   app.get("/api/courses/:id/export/:format", auth, async (req: AuthedRequest, res) => {
-    const row = viewable(req, res);
+    const row = await viewable(req, res);
     if (!row) return;
-    const course = toCourse(row, req.user!.id);
+    const course = await toCourse(row, req.user!.id);
     const format = String(req.params.format);
     const requested = String(req.query.parts || ALL_PARTS.join(","))
       .split(",")
@@ -270,36 +425,56 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     },
   );
 
-  // ---------- Audio ----------
+  // ---------- Audio (ancien format : un fichier par cours) ----------
   app.post(
     "/api/courses/:id/audio",
     auth,
     express.raw({ type: () => true, limit: "300mb" }),
-    (req: AuthedRequest, res) => {
-      const row = storage.getCourse(Number(req.params.id));
-      if (!row || row.ownerId !== req.user!.id) return res.status(404).json({ message: "Cours introuvable." });
+    h(async (req, res) => {
+      const row = await owned(req, res);
+      if (!row) return;
       if (!Buffer.isBuffer(req.body) || req.body.length === 0) return res.status(400).json({ message: "Fichier audio vide." });
-      fs.writeFileSync(path.join(UPLOAD_DIR, `${row.id}.webm`), req.body);
-      storage.updateCourse(row.id, req.user!.id, { hasAudio: 1 });
+      fs.writeFileSync(audioPath(row.id), req.body);
+      await storage.updateCourse(row.id, req.user!.id, { hasAudio: true, transcriptUpdatedAt: row.transcriptUpdatedAt });
       res.json({ ok: true, bytes: req.body.length });
-    },
+    }),
   );
 
-  app.get("/api/courses/:id/audio", auth, (req: AuthedRequest, res) => {
-    const row = storage.getCourse(Number(req.params.id));
-    if (!row || row.ownerId !== req.user!.id) return res.status(404).end();
-    const file = path.join(UPLOAD_DIR, `${row.id}.webm`);
+  app.get("/api/courses/:id/audio", auth, h(async (req, res) => {
+    const row = await owned(req, res);
+    if (!row) return;
+    const file = audioPath(row.id);
     if (!fs.existsSync(file)) return res.status(404).end();
     res.setHeader("Content-Type", "audio/webm");
     if (req.query.download) res.setHeader("Content-Disposition", `attachment; filename="cours-${row.id}.webm"`);
     fs.createReadStream(file).pipe(res);
+  }));
+
+  // ---------- Import d'un enregistrement audio (fichier du téléphone, dictaphone…) ----------
+  app.post(
+    "/api/transcribe-file",
+    auth,
+    express.raw({ type: () => true, limit: "400mb" }),
+    h(async (req, res) => {
+      if (!Buffer.isBuffer(req.body) || req.body.length < 2000) return res.status(400).json({ message: "Fichier audio vide ou illisible." });
+      const mime = String(req.headers["content-type"] || "application/octet-stream").split(";")[0];
+      const context = String(req.query.context || "").slice(0, 300);
+      const job = startFileJob(req.user!.id, req.body, mime, context);
+      res.json({ jobId: job });
+    }),
+  );
+
+  app.get("/api/transcribe-file/:job", auth, (req: AuthedRequest, res) => {
+    const j = getFileJob(String(req.params.job), req.user!.id);
+    if (!j) return res.status(404).json({ message: "Tâche introuvable." });
+    res.json(j);
   });
 
   // ---------- Génération IA ----------
-  app.post("/api/courses/:id/generate/:kind", auth, async (req: AuthedRequest, res) => {
+  app.post("/api/courses/:id/generate/:kind", auth, h(async (req: AuthedRequest, res) => {
     const kind = String(req.params.kind);
     if (!["notes", "sheet", "exercises", "exam"].includes(kind)) return res.status(400).json({ message: "Type inconnu." });
-    const row = storage.getCourse(Number(req.params.id));
+    const row = await storage.getCourse(Number(req.params.id));
     if (!row || row.ownerId !== req.user!.id) return res.status(404).json({ message: "Cours introuvable." });
     const words = row.transcript.trim().split(/\s+/).filter(Boolean).length;
     if (words < 40)
@@ -309,29 +484,31 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     running.add(key);
     const meta = { title: row.title, subject: row.subject, level: row.level };
     try {
-      let notes = row.notes ? JSON.parse(row.notes) : null;
+      const started = Date.now();
+      let notes = row.notes ?? null;
       const patch: any = {};
       if (kind === "notes" || !notes) {
         notes = normalizeNotes(await generateNotes(meta, row.transcript));
-        patch.notes = JSON.stringify(notes);
+        patch.notes = notes;
+        patch.analyzedAt = started;
       }
-      if (kind === "sheet") patch.sheet = JSON.stringify(normalizeSheet(await generateSheet(meta, row.transcript, notes)));
-      if (kind === "exercises") patch.exercises = JSON.stringify(normalizeExercises(await generateExercises(meta, row.transcript, notes)));
-      if (kind === "exam") patch.exam = JSON.stringify(normalizeExam(await generateExam(meta, row.transcript, notes)));
-      const updated = storage.updateCourse(row.id, req.user!.id, patch)!;
-      res.json(toCourse(updated, req.user!.id));
+      if (kind === "sheet") patch.sheet = normalizeSheet(await generateSheet(meta, row.transcript, notes));
+      if (kind === "exercises") patch.exercises = normalizeExercises(await generateExercises(meta, row.transcript, notes));
+      if (kind === "exam") patch.exam = normalizeExam(await generateExam(meta, row.transcript, notes));
+      const updated = (await storage.updateCourse(row.id, req.user!.id, patch))!;
+      res.json(await toCourse(updated, req.user!.id));
     } catch (e: any) {
       console.error("generation error", e?.message); fs.appendFileSync("gen-errors.log", `${new Date().toISOString()} ${kind} ${e?.status ?? ""} ${e?.message}\n`);
       res.status(502).json({ message: "L'IA n'a pas pu terminer la génération. Ta transcription est intacte : réessaie dans un instant." });
     } finally {
       running.delete(key);
     }
-  });
+  }));
 
-  app.post("/api/courses/:id/exam/grade", auth, async (req: AuthedRequest, res) => {
-    const row = viewable(req, res);
+  app.post("/api/courses/:id/exam/grade", auth, h(async (req: AuthedRequest, res) => {
+    const row = await viewable(req, res);
     if (!row) return;
-    const exam: Exam | null = row.exam ? JSON.parse(row.exam) : null;
+    const exam: Exam | null = row.exam ?? null;
     if (!exam) return res.status(400).json({ message: "Aucun examen pour ce cours." });
     const answers: Record<string, any> = req.body?.answers || {};
     const all = exam.sections.flatMap((s) => s.questions);
@@ -378,7 +555,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     const score = Math.round(per.reduce((s, p) => s + p.points_awarded, 0) * 2) / 2;
     const max = per.reduce((s, p) => s + p.max_points, 0);
     res.json({ score, max, per_question: per, overall_feedback: overall, priorities } satisfies ExamGrade);
-  });
+  }));
 
   return httpServer;
 }

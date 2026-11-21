@@ -47,6 +47,8 @@ export function useRecorder(
   );
   const [speechError, setSpeechError] = useState<string | null>(null);
   const [micError, setMicError] = useState<string | null>(null);
+  /** "frame" : le micro est bloqué par la fenêtre intégrée (aperçu) ; "denied" : refusé par l'utilisateur. */
+  const [micBlocked, setMicBlocked] = useState<null | "frame" | "denied">(null);
   const [audioBlob, setAudioBlob] = useState<Blob | null>(null);
   const [silenceLeft, setSilenceLeft] = useState(INACTIVITY_MS);
 
@@ -363,9 +365,15 @@ export function useRecorder(
   const start = useCallback(async () => {
     if (stateRef.current === "recording" || stateRef.current === "starting") return;
     setMicError(null);
+    setMicBlocked(null);
     setSpeechError(null);
     setS("starting");
     try {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        const err: any = new Error("micro indisponible dans cette fenêtre");
+        err.name = "SecurityError";
+        throw err;
+      }
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
       });
@@ -423,8 +431,16 @@ export function useRecorder(
       startSpeech();
     } catch (e: any) {
       setS("idle");
-      if (e?.name === "NotAllowedError")
+      if (micBlockedByFrame() && (e?.name === "NotAllowedError" || e?.name === "SecurityError")) {
+        setMicBlocked("frame");
+        setMicError("Le micro est bloqué par la fenêtre dans laquelle l'application est affichée.");
+      } else if (e?.name === "SecurityError") {
+        setMicBlocked("frame");
+        setMicError("Le navigateur bloque le micro sur cette page.");
+      } else if (e?.name === "NotAllowedError") {
+        setMicBlocked("denied");
         setMicError("Accès au micro refusé. Clique sur l'icône de cadenas dans la barre d'adresse, autorise le micro, puis réessaie.");
+      }
       else if (e?.name === "NotFoundError") setMicError("Aucun micro détecté sur cet appareil.");
       else setMicError("Impossible de démarrer le micro : " + (e?.message || "erreur inconnue"));
     }
@@ -498,6 +514,7 @@ export function useRecorder(
     speechStatus,
     speechError,
     micError,
+    micBlocked,
     audioBlob,
     silenceLeft,
     sttStatus,
@@ -512,6 +529,20 @@ export function useRecorder(
     stop,
     reset,
   };
+}
+
+/** Vrai si la page tourne dans une fenêtre intégrée (iframe) ou une origine isolée qui empêche l'accès au micro. */
+export function micBlockedByFrame() {
+  let framed = false;
+  try {
+    framed = window.self !== window.top;
+  } catch {
+    framed = true;
+  }
+  const opaque = window.origin === "null";
+  const fp = (document as any).featurePolicy;
+  const policyBlocks = fp?.allowsFeature ? !fp.allowsFeature("microphone") : false;
+  return framed || opaque || policyBlocks || !window.isSecureContext;
 }
 
 export function formatDuration(sec: number) {

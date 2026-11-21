@@ -84,8 +84,35 @@ export async function apiTranscribe(blob: Blob, context: string): Promise<string
   return String(data.text || "");
 }
 
-export function audioUrl(courseId: number, download = false) {
-  return `${API_BASE}/api/courses/${courseId}/audio?token=${authToken ?? ""}${download ? "&download=1" : ""}`;
+export function audioUrl(courseId: number, download = false, sessionId?: number) {
+  const base = sessionId ? `/api/courses/${courseId}/sessions/${sessionId}/audio` : `/api/courses/${courseId}/audio`;
+  return `${API_BASE}${base}?token=${authToken ?? ""}${download ? "&download=1" : ""}`;
+}
+
+/** Transcrit un fichier audio complet (enregistrement du téléphone, dictaphone…). */
+export async function apiTranscribeFile(
+  file: Blob,
+  context: string,
+  onProgress: (p: { done: number; total: number; text: string }) => void,
+  signal?: { cancelled: boolean },
+): Promise<{ text: string; durationSec: number }> {
+  const res = await fetch(`${API_BASE}/api/transcribe-file?context=${encodeURIComponent(context.slice(0, 300))}`, {
+    method: "POST",
+    headers: headers({ "Content-Type": file.type || "application/octet-stream" }),
+    body: file,
+  });
+  await throwIfResNotOk(res);
+  const { jobId } = await res.json();
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 1500));
+    if (signal?.cancelled) throw new Error("Import annulé.");
+    const r = await fetch(`${API_BASE}/api/transcribe-file/${jobId}`, { headers: headers() });
+    await throwIfResNotOk(r);
+    const j = await r.json();
+    onProgress({ done: j.done, total: j.total, text: j.text });
+    if (j.status === "done") return { text: j.text, durationSec: j.durationSec };
+    if (j.status === "error") throw new Error(j.error || "La transcription du fichier a échoué.");
+  }
 }
 
 type UnauthorizedBehavior = "returnNull" | "throw";

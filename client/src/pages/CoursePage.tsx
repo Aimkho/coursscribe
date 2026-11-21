@@ -5,6 +5,12 @@ import { Link, useLocation } from "wouter";
 import {
   ArrowLeft,
   Brain,
+  CalendarDays,
+  CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
+  Mic,
+  RotateCcw,
   ClipboardList,
   Download,
   FileText,
@@ -38,7 +44,7 @@ import { apiRequest, audioUrl, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 import { formatDuration } from "@/lib/useRecorder";
-import { formatDate } from "@/components/CourseCard";
+import { formatDate, StatusBadge } from "@/components/CourseCard";
 import { NotesView, SheetView, ExercisesView, ExamView } from "@/components/StudyViews";
 import { autoAnalyze } from "./RecordPage";
 
@@ -124,6 +130,13 @@ export default function CoursePage({ id, publicView }: { id: number; publicView?
       generateAll();
     }
   }, [course, owner]);
+
+  async function regenerateAll() {
+    await generate("notes");
+    const latest = queryClient.getQueryData<Course>(["/api/courses", id]);
+    if (!latest?.notes || latest.analysisStale) return;
+    await Promise.all((["sheet", "exercises", "exam"] as Kind[]).map((k) => generate(k)));
+  }
 
   async function patch(data: Record<string, unknown>) {
     const res = await apiRequest("PATCH", `/api/courses/${id}`, data);
@@ -296,7 +309,16 @@ export default function CoursePage({ id, publicView }: { id: number; publicView?
       <header className="mb-6 flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2 text-xs">
-            {course.subject && <span className="font-semibold uppercase tracking-wider text-primary">{course.subject}</span>}
+            {course.subject &&
+              (owner && course.subjectId ? (
+                <Link href={`/subject/${course.subjectId}`} className="font-semibold uppercase tracking-wider text-primary hover:underline" data-testid="link-subject">
+                  {course.subject}
+                </Link>
+              ) : (
+                <span className="font-semibold uppercase tracking-wider text-primary">{course.subject}</span>
+              ))}
+            {course.chapterNumber && <span className="font-semibold uppercase tracking-wider text-muted-foreground">· Chapitre {course.chapterNumber}</span>}
+            {owner && <StatusBadge status={course.status} />}
             {course.level && <span className="rounded-md bg-muted px-2 py-0.5 text-muted-foreground">{course.level}</span>}
           </div>
           <h1 className="mt-1.5 break-anywhere font-display text-xl font-bold leading-tight" data-testid="text-course-title">
@@ -308,16 +330,38 @@ export default function CoursePage({ id, publicView }: { id: number; publicView?
                 <User2 className="h-3.5 w-3.5" /> {course.ownerName}
               </span>
             )}
-            <span>{formatDate(course.createdAt)}</span>
+            <span>
+              {formatDate(course.createdAt)}
+              {course.sessions.length > 1 && formatDate(course.sessions[course.sessions.length - 1].startedAt) !== formatDate(course.createdAt)
+                ? ` → ${formatDate(course.sessions[course.sessions.length - 1].startedAt)}`
+                : ""}
+            </span>
+            {course.sessions.length > 1 && <span>{course.sessions.length} séances</span>}
             {course.durationSec > 0 && <span>{formatDuration(course.durationSec)} d'enregistrement</span>}
             <span>{words.toLocaleString("fr-FR")} mots</span>
           </p>
         </div>
 
         <div className="no-print flex flex-wrap items-center gap-2">
+          {owner && (
+            <Button asChild data-testid="button-continue">
+              <Link href={`/record/continue/${course.id}`}>
+                <Mic className="mr-2 h-4 w-4" /> Continuer le cours
+              </Link>
+            </Button>
+          )}
           <ExportDialog course={course} />
           {owner && (
             <>
+            <Button
+              variant="outline"
+              onClick={() => patch({ status: course.status === "termine" ? "en_cours" : "termine" })}
+              data-testid="button-toggle-status"
+              title={course.status === "termine" ? "Rouvrir ce chapitre" : "Marquer ce chapitre comme terminé"}
+            >
+              {course.status === "termine" ? <RotateCcw className="mr-2 h-4 w-4" /> : <CheckCircle2 className="mr-2 h-4 w-4" />}
+              {course.status === "termine" ? "Rouvrir" : "Terminé"}
+            </Button>
             <label
               className={cn(
                 "flex cursor-pointer items-center gap-3 rounded-xl border px-3.5 py-2",
@@ -346,14 +390,62 @@ export default function CoursePage({ id, publicView }: { id: number; publicView?
         </div>
       </header>
 
-      {owner && course.hasAudio && (
-        <div className="no-print mb-6 flex flex-col gap-3 rounded-2xl border border-card-border bg-card p-3 sm:flex-row sm:items-center">
-          <audio controls preload="none" src={audioUrl(course.id)} className="h-10 w-full min-w-0 flex-1" data-testid="audio-player" />
-          <Button variant="ghost" size="sm" asChild>
-            <a href={audioUrl(course.id, true)} target="_blank" rel="noopener noreferrer" data-testid="link-download-audio">
-              <Download className="mr-1.5 h-4 w-4" /> Audio
-            </a>
+      {owner && course.analysisStale && course.notes && (
+        <div className="no-print mb-6 flex flex-col gap-3 rounded-2xl border border-[#FE277E]/30 bg-[#FE277E]/5 p-4 sm:flex-row sm:items-center sm:justify-between sm:px-5" data-testid="banner-stale">
+          <div>
+            <p className="text-sm font-semibold text-[#8A0D1E]">Le cours a évolué depuis la dernière analyse</p>
+            <p className="text-sm text-muted-foreground">De nouvelles séances ont été ajoutées. Mets à jour les notes, la fiche, les exercices et l'examen pour couvrir tout le chapitre.</p>
+          </div>
+          <Button onClick={regenerateAll} disabled={anyPending} className="shrink-0" data-testid="button-update-analysis">
+            {anyPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
+            {anyPending ? "Mise à jour…" : "Mettre à jour"}
           </Button>
+        </div>
+      )}
+
+      {owner && (course.sessions.length > 0 || course.hasAudio) && (
+        <div className="no-print mb-6 rounded-2xl border border-card-border bg-card p-3">
+          {course.sessions.length > 0 ? (
+            <ul className="divide-y divide-border">
+              {course.sessions.map((s) => (
+                <li key={s.id} className="flex flex-col gap-2 py-2.5 first:pt-1 last:pb-1 sm:flex-row sm:items-center sm:gap-4" data-testid={`row-session-${s.idx}`}>
+                  <div className="flex shrink-0 items-center gap-2.5 sm:w-56">
+                    <span className="grid h-7 w-7 place-items-center rounded-lg bg-secondary text-xs font-bold text-secondary-foreground">{s.idx}</span>
+                    <div className="min-w-0 text-sm">
+                      <p className="font-medium">
+                        <CalendarDays className="mr-1 inline h-3.5 w-3.5 text-muted-foreground" />
+                        {new Date(s.startedAt).toLocaleDateString("fr-FR", { weekday: "short", day: "numeric", month: "short" })}
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        {formatDuration(s.durationSec)} · {s.wordCount.toLocaleString("fr-FR")} mots
+                      </p>
+                    </div>
+                  </div>
+                  {s.hasAudio || (course.sessions.length === 1 && course.hasAudio) ? (
+                    <div className="flex min-w-0 flex-1 items-center gap-2">
+                      <audio controls preload="none" src={s.hasAudio ? audioUrl(course.id, false, s.id) : audioUrl(course.id)} className="h-9 w-full min-w-0 flex-1" data-testid={`audio-session-${s.idx}`} />
+                      <Button variant="ghost" size="icon" asChild>
+                        <a href={s.hasAudio ? audioUrl(course.id, true, s.id) : audioUrl(course.id, true)} target="_blank" rel="noopener noreferrer" aria-label="Télécharger l'audio">
+                          <Download className="h-4 w-4" />
+                        </a>
+                      </Button>
+                    </div>
+                  ) : (
+                    <p className="flex-1 text-xs text-muted-foreground">Pas d'audio pour cette séance.</p>
+                  )}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+              <audio controls preload="none" src={audioUrl(course.id)} className="h-10 w-full min-w-0 flex-1" data-testid="audio-player" />
+              <Button variant="ghost" size="sm" asChild>
+                <a href={audioUrl(course.id, true)} target="_blank" rel="noopener noreferrer" data-testid="link-download-audio">
+                  <Download className="mr-1.5 h-4 w-4" /> Audio
+                </a>
+              </Button>
+            </div>
+          )}
         </div>
       )}
 
@@ -401,6 +493,36 @@ export default function CoursePage({ id, publicView }: { id: number; publicView?
       </div>
 
       {renderTab()}
+
+      {(() => {
+        const i = course.siblings.findIndex((x) => x.id === course.id);
+        if (i < 0 || course.siblings.length < 2) return null;
+        const prev = course.siblings[i - 1];
+        const next = course.siblings[i + 1];
+        const base = publicView ? "/public/" : "/course/";
+        return (
+          <nav className="no-print mt-10 grid gap-3 border-t border-border pt-6 sm:grid-cols-2" aria-label="Chapitres">
+            {prev ? (
+              <Link href={`${base}${prev.id}`} className="group rounded-xl border border-card-border bg-card p-4 hover:border-primary/40" data-testid="link-prev-chapter">
+                <p className="flex items-center gap-1 text-xs text-muted-foreground">
+                  <ChevronLeft className="h-3.5 w-3.5" /> {prev.chapterNumber ? `Chapitre ${prev.chapterNumber}` : "Précédent"}
+                </p>
+                <p className="mt-1 truncate text-sm font-semibold group-hover:text-primary">{prev.title}</p>
+              </Link>
+            ) : (
+              <span />
+            )}
+            {next && (
+              <Link href={`${base}${next.id}`} className="group rounded-xl border border-card-border bg-card p-4 text-right hover:border-primary/40" data-testid="link-next-chapter">
+                <p className="flex items-center justify-end gap-1 text-xs text-muted-foreground">
+                  {next.chapterNumber ? `Chapitre ${next.chapterNumber}` : "Suivant"} <ChevronRight className="h-3.5 w-3.5" />
+                </p>
+                <p className="mt-1 truncate text-sm font-semibold group-hover:text-primary">{next.title}</p>
+              </Link>
+            )}
+          </nav>
+        );
+      })()}
 
       <AlertDialog open={confirmDelete} onOpenChange={setConfirmDelete}>
         <AlertDialogContent>
