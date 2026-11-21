@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { useRecorder, formatDuration } from "@/lib/useRecorder";
-import { apiRequest, apiUpload, queryClient } from "@/lib/queryClient";
+import { apiRequest, apiUpload, apiTranscribe, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 
@@ -46,7 +46,15 @@ export default function RecordPage() {
   const transcriptRef = useRef<HTMLTextAreaElement>(null);
   const followRef = useRef(true);
 
+  const metaRef = useRef({ title: "", subject: "", transcript: "" });
+  metaRef.current = { title, subject, transcript };
+
   const rec = useRecorder({
+    transcribe: apiTranscribe,
+    getContext: () => {
+      const m = metaRef.current;
+      return [m.subject, m.title, m.transcript.slice(-150)].filter(Boolean).join(" — ");
+    },
     onFinal: (t) =>
       setTranscript((prev) => {
         const sep = prev && !/\s$/.test(prev) ? " " : "";
@@ -62,7 +70,7 @@ export default function RecordPage() {
   useEffect(() => {
     const el = transcriptRef.current;
     if (el && followRef.current) el.scrollTop = el.scrollHeight;
-  }, [transcript, rec.interim]);
+  }, [transcript, rec.interim, rec.preview]);
 
   const words = transcript.trim() ? transcript.trim().split(/\s+/).length : 0;
   const recording = rec.state === "recording";
@@ -73,14 +81,19 @@ export default function RecordPage() {
       toast({ title: "Donne un titre à ton cours", description: "Par exemple : « Chapitre 3 — Le seuil de rentabilité »." });
       return;
     }
-    if (live) rec.stop();
     setSaving(analyze ? "analyze" : "save");
+    if (live) {
+      rec.stop();
+      // Attendre la transcription des derniers extraits avant d'enregistrer.
+      await rec.waitForPending();
+      await new Promise((r) => setTimeout(r, 50));
+    }
     try {
       const res = await apiRequest("POST", "/api/courses", {
         title,
         subject,
         level,
-        transcript: transcript.trim(),
+        transcript: metaRef.current.transcript.trim(),
         durationSec: rec.elapsed,
       });
       const course: Course = await res.json();
@@ -236,10 +249,16 @@ export default function RecordPage() {
                 <Info className="mt-0.5 h-4 w-4 shrink-0" /> {rec.speechError}
               </p>
             )}
-            {rec.speechStatus === "unsupported" && (
-              <p className="mt-3 flex gap-2 rounded-lg border border-border bg-muted px-3 py-2 text-sm text-muted-foreground">
+            {rec.sttStatus === "error" && live && (
+              <p className="mt-3 flex gap-2 rounded-lg border border-border bg-muted px-3 py-2 text-sm text-muted-foreground" data-testid="text-stt-error">
                 <Info className="mt-0.5 h-4 w-4 shrink-0" />
-                Ce navigateur ne propose pas la transcription en direct. Utilise Chrome ou Edge, ou importe/colle le texte du cours.
+                Un extrait n'a pas pu être transcrit (connexion). L'enregistrement continue et l'audio complet est conservé.
+              </p>
+            )}
+            {rec.state === "idle" && (
+              <p className="mt-3 flex gap-2 text-xs leading-5 text-muted-foreground">
+                <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                Transcription par IA sur ton micro, extrait par extrait (quelques secondes de décalage). Fonctionne sur Chrome, Edge, Firefox et Safari.
               </p>
             )}
 
@@ -271,9 +290,14 @@ export default function RecordPage() {
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-5 py-3.5">
             <div className="flex items-center gap-2">
               <h2 className="text-sm font-semibold">Transcription en direct</h2>
-              {rec.speechStatus === "listening" && recording && (
-                <span className="inline-flex items-center gap-1.5 text-xs font-medium text-[#C3155D]">
+              {recording && (
+                <span className="inline-flex items-center gap-1.5 text-xs font-medium text-[#C3155D]" data-testid="status-listening">
                   <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[#FE277E]" /> à l'écoute
+                </span>
+              )}
+              {rec.pendingCount > 0 && (
+                <span className="inline-flex items-center gap-1.5 text-xs font-medium text-primary" data-testid="status-transcribing">
+                  <Loader2 className="h-3 w-3 animate-spin" /> transcription…
                 </span>
               )}
             </div>
@@ -300,10 +324,13 @@ export default function RecordPage() {
               className="min-h-[360px] flex-1 resize-none rounded-none border-0 px-5 py-4 text-[15px] leading-7 shadow-none focus-visible:ring-0"
               data-testid="textarea-transcript"
             />
-            {rec.interim && (
-              <p className="border-t border-dashed border-border px-5 py-3 text-[15px] italic leading-7 text-muted-foreground" data-testid="text-interim">
-                {rec.interim}
-              </p>
+            {(rec.pendingPreview || rec.preview || rec.interim) && (
+              <div className="border-t border-dashed border-border px-5 py-3" data-testid="text-interim">
+                <p className="mb-1 text-[11px] font-semibold uppercase tracking-[0.12em] text-muted-foreground/80">Aperçu instantané</p>
+                <p className="text-[15px] italic leading-7 text-muted-foreground">
+                  {[rec.pendingPreview, rec.preview, rec.interim].filter(Boolean).join(" ")}
+                </p>
+              </div>
             )}
           </div>
           <div className="flex flex-col gap-3 border-t border-border px-5 py-4 sm:flex-row sm:items-center sm:justify-between">

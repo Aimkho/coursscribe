@@ -7,6 +7,11 @@ import path from "node:path";
 import { storage, toCourse, toSummary } from "./storage";
 import { registerSchema, loginSchema, courseInputSchema, coursePatchSchema } from "@shared/schema";
 import type { User, Exam, ExamGrade } from "@shared/schema";
+import { transcribeAudio, cleanTranscript } from "./stt";
+import { buildBlocks, ALL_PARTS, safeFileName, type ExportPart } from "./export/blocks";
+import { renderPdf } from "./export/pdf";
+import { renderDocx } from "./export/docx";
+import { renderPptx } from "./export/pptx";
 import { generateNotes, generateSheet, generateExercises, generateExam, gradeOpenAnswers } from "./ai";
 
 const UPLOAD_DIR = path.resolve("uploads");
@@ -204,6 +209,66 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     fs.rmSync(path.join(UPLOAD_DIR, `${id}.webm`), { force: true });
     res.json({ ok: true });
   });
+
+  // ---------- Exports PDF / Word / PowerPoint ----------
+  app.get("/api/courses/:id/export/:format", auth, async (req: AuthedRequest, res) => {
+    const row = viewable(req, res);
+    if (!row) return;
+    const course = toCourse(row, req.user!.id);
+    const format = String(req.params.format);
+    const requested = String(req.query.parts || ALL_PARTS.join(","))
+      .split(",")
+      .filter((p): p is ExportPart => (ALL_PARTS as string[]).includes(p));
+    const parts = requested.length ? requested : ALL_PARTS;
+    const withAnswers = req.query.answers !== "0";
+    const base = safeFileName(course.title);
+    try {
+      if (format === "pptx") {
+        if (!course.notes) return res.status(400).json({ message: "Génère d'abord les notes du cours pour créer la présentation." });
+        const buf = await renderPptx(course);
+        res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.presentationml.presentation");
+        res.setHeader("Content-Disposition", `attachment; filename="${base}.pptx"`);
+        return res.send(buf);
+      }
+      const blocks = buildBlocks(course, parts, withAnswers);
+      if (!blocks.length) return res.status(400).json({ message: "Rien à exporter : génère d'abord les notes, la fiche, les exercices ou l'examen." });
+      if (format === "pdf") {
+        const buf = await renderPdf(course, blocks);
+        res.setHeader("Content-Type", "application/pdf");
+        res.setHeader("Content-Disposition", `attachment; filename="${base}.pdf"`);
+        return res.send(buf);
+      }
+      if (format === "docx") {
+        const buf = await renderDocx(course, blocks);
+        res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
+        res.setHeader("Content-Disposition", `attachment; filename="${base}.docx"`);
+        return res.send(buf);
+      }
+      res.status(400).json({ message: "Format inconnu." });
+    } catch (e: any) {
+      fs.appendFileSync("gen-errors.log", `${new Date().toISOString()} export ${format} ${e?.stack || e?.message}\n`);
+      res.status(500).json({ message: "L'export a échoué. Réessaie." });
+    }
+  });
+
+  // ---------- Transcription en direct (micro réel) ----------
+  app.post(
+    "/api/transcribe",
+    auth,
+    express.raw({ type: () => true, limit: "20mb" }),
+    async (req: AuthedRequest, res) => {
+      if (!Buffer.isBuffer(req.body) || req.body.length < 800) return res.json({ text: "" });
+      const mime = String(req.headers["content-type"] || "audio/webm").split(";")[0] || "audio/webm";
+      const context = String(req.query.context || "").slice(0, 300);
+      try {
+        const text = cleanTranscript(await transcribeAudio(req.body, mime, context));
+        res.json({ text });
+      } catch (e: any) {
+        fs.appendFileSync("gen-errors.log", `${new Date().toISOString()} stt ${e?.message}\n`);
+        res.status(502).json({ message: "Transcription momentanément indisponible." });
+      }
+    },
+  );
 
   // ---------- Audio ----------
   app.post(

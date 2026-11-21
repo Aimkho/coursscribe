@@ -1,3 +1,4 @@
+import { ExportDialog } from "@/components/ExportDialog";
 import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useLocation } from "wouter";
@@ -313,8 +314,10 @@ export default function CoursePage({ id, publicView }: { id: number; publicView?
           </p>
         </div>
 
-        {owner && (
-          <div className="no-print flex flex-wrap items-center gap-2">
+        <div className="no-print flex flex-wrap items-center gap-2">
+          <ExportDialog course={course} />
+          {owner && (
+            <>
             <label
               className={cn(
                 "flex cursor-pointer items-center gap-3 rounded-xl border px-3.5 py-2",
@@ -338,8 +341,9 @@ export default function CoursePage({ id, publicView }: { id: number; publicView?
             >
               <Trash2 className="h-4 w-4" />
             </Button>
-          </div>
-        )}
+            </>
+          )}
+        </div>
       </header>
 
       {owner && course.hasAudio && (

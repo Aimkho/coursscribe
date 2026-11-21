@@ -55,6 +55,35 @@ export async function apiUpload(url: string, blob: Blob): Promise<Response> {
   return res;
 }
 
+/** Télécharge un fichier généré par le serveur (export PDF, Word, PowerPoint). */
+export async function apiDownload(url: string, fallbackName: string) {
+  const res = await fetch(`${API_BASE}${url}`, { headers: headers() });
+  await throwIfResNotOk(res);
+  const blob = await res.blob();
+  const cd = res.headers.get("Content-Disposition") || "";
+  const name = /filename="([^"]+)"/.exec(cd)?.[1] || fallbackName;
+  const href = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = href;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(href), 30000);
+}
+
+/** Envoie un extrait audio du micro et renvoie le texte transcrit par l'IA. */
+export async function apiTranscribe(blob: Blob, context: string): Promise<string> {
+  const res = await fetch(`${API_BASE}/api/transcribe?context=${encodeURIComponent(context.slice(0, 300))}`, {
+    method: "POST",
+    headers: headers({ "Content-Type": blob.type || "audio/webm" }),
+    body: blob,
+  });
+  await throwIfResNotOk(res);
+  const data = await res.json();
+  return String(data.text || "");
+}
+
 export function audioUrl(courseId: number, download = false) {
   return `${API_BASE}/api/courses/${courseId}/audio?token=${authToken ?? ""}${download ? "&download=1" : ""}`;
 }

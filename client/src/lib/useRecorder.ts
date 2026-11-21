@@ -1,9 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 export type RecState = "idle" | "starting" | "recording" | "paused" | "stopped";
+export type SttStatus = "idle" | "ok" | "busy" | "error";
 export type PauseReason = "manual" | "inactivity" | null;
 
 const INACTIVITY_MS = 5 * 60 * 1000;
+// Découpage de l'audio en extraits envoyés à la transcription IA.
+const SEG_MIN_MS = 8000; // on coupe sur une pause naturelle après 8 s
+const SEG_MAX_MS = 16000; // coupe forcée à 16 s
+const QUIET_CUT_MS = 350; // durée de silence qui marque une pause
+const MIN_VOICED_MS = 500; // en dessous, l'extrait est considéré comme silencieux
 
 type SR = any;
 function getSpeechRecognition(): (new () => SR) | null {
@@ -16,13 +22,21 @@ export function speechSupported() {
 }
 
 /**
- * Enregistrement audio + transcription en direct.
- * - Une seule capture micro (getUserMedia) pour l'audio.
- * - La reconnaissance vocale du navigateur est relancée automatiquement quand elle se coupe
- *   (fin de phrase, silence), avec une limite pour éviter les boucles.
+ * Enregistrement audio + transcription en direct sur le micro réel.
+ * - Une seule capture micro (getUserMedia) : enregistrement complet + extraits de ~10 s.
+ * - Chaque extrait contenant de la parole est transcrit par l'IA côté serveur (fiable,
+ *   tous navigateurs). Les textes sont ajoutés dans l'ordre, même si les réponses arrivent en désordre.
+ * - La reconnaissance vocale du navigateur, si disponible, sert uniquement d'aperçu instantané.
  * - Pause automatique après 5 minutes sans activité sonore.
  */
-export function useRecorder(opts: { lang?: string; onFinal?: (text: string) => void } = {}) {
+export function useRecorder(
+  opts: {
+    lang?: string;
+    onFinal?: (text: string) => void;
+    transcribe?: (blob: Blob, context: string) => Promise<string>;
+    getContext?: () => string;
+  } = {},
+) {
   const [state, setState] = useState<RecState>("idle");
   const [pauseReason, setPauseReason] = useState<PauseReason>(null);
   const [elapsed, setElapsed] = useState(0);
@@ -53,6 +67,29 @@ export function useRecorder(opts: { lang?: string; onFinal?: (text: string) => v
   const thresholdRef = useRef(0.02);
   const onFinalRef = useRef(opts.onFinal);
   onFinalRef.current = opts.onFinal;
+  const transcribeRef = useRef(opts.transcribe);
+  transcribeRef.current = opts.transcribe;
+  const getContextRef = useRef(opts.getContext);
+  getContextRef.current = opts.getContext;
+
+  // ----- Transcription IA par extraits -----
+  const [sttStatus, setSttStatus] = useState<SttStatus>("idle");
+  const [pendingCount, setPendingCount] = useState(0);
+  const [pendingPreview, setPendingPreview] = useState("");
+  const [preview, setPreview] = useState(""); // aperçu navigateur de l'extrait en cours
+  const segRecRef = useRef<MediaRecorder | null>(null);
+  const segChunksRef = useRef<Blob[]>([]);
+  const segStartRef = useRef(0);
+  const segVoicedRef = useRef(0);
+  const lastLoudRef = useRef(0);
+  const lastFrameRef = useRef(0);
+  const seqRef = useRef(0);
+  const nextCommitRef = useRef(0);
+  const resultsRef = useRef(new Map<number, string | null>());
+  const previewsRef = useRef(new Map<number, string>());
+  const curPreviewRef = useRef(""); // phrases finales du navigateur depuis la dernière coupe
+  const mimeRef = useRef("");
+  const failStreakRef = useRef(0);
 
   const setS = (s: RecState) => {
     stateRef.current = s;
@@ -91,7 +128,11 @@ export function useRecorder(opts: { lang?: string; onFinal?: (text: string) => v
         const t = res[0].transcript;
         if (res.isFinal) {
           const clean = t.trim();
-          if (clean) onFinalRef.current?.(clean);
+          if (!clean) continue;
+          if (transcribeRef.current) {
+            curPreviewRef.current = (curPreviewRef.current + " " + clean).trim();
+            setPreview(curPreviewRef.current);
+          } else onFinalRef.current?.(clean);
         } else inter += t;
       }
       setInterim(inter);
@@ -100,6 +141,12 @@ export function useRecorder(opts: { lang?: string; onFinal?: (text: string) => v
     r.onerror = (ev: any) => {
       const code = ev.error;
       if (code === "no-speech" || code === "aborted") return;
+      if (transcribeRef.current) {
+        // L'aperçu navigateur est facultatif : la transcription IA continue.
+        if (code === "not-allowed" || code === "service-not-allowed") wantSpeechRef.current = false;
+        setSpeechStatus("error");
+        return;
+      }
       if (code === "not-allowed" || code === "service-not-allowed") {
         wantSpeechRef.current = false;
         setSpeechStatus("error");
@@ -157,6 +204,103 @@ export function useRecorder(opts: { lang?: string; onFinal?: (text: string) => v
     setInterim("");
   }, []);
 
+
+  // ----- Extraits audio -> transcription IA -----
+  const commitInOrder = useCallback(() => {
+    const m = resultsRef.current;
+    while (m.has(nextCommitRef.current)) {
+      const seq = nextCommitRef.current;
+      const t = m.get(seq);
+      m.delete(seq);
+      previewsRef.current.delete(seq);
+      if (t) onFinalRef.current?.(t);
+      nextCommitRef.current++;
+    }
+    setPendingCount(seqRef.current - nextCommitRef.current);
+    setPendingPreview(Array.from(previewsRef.current.values()).filter(Boolean).join(" "));
+  }, []);
+
+  const sendSegment = useCallback(
+    async (seq: number, blob: Blob, voicedMs: number, previewText: string) => {
+      previewsRef.current.set(seq, previewText);
+      setPendingCount(seqRef.current - nextCommitRef.current);
+      setPendingPreview(Array.from(previewsRef.current.values()).filter(Boolean).join(" "));
+      const fn = transcribeRef.current;
+      if (!fn || voicedMs < MIN_VOICED_MS || blob.size < 1500) {
+        // Extrait silencieux : rien à transcrire (on garde l'aperçu navigateur s'il a entendu quelque chose).
+        resultsRef.current.set(seq, previewText || null);
+        commitInOrder();
+        return;
+      }
+      try {
+        const t = await fn(blob, getContextRef.current?.() || "");
+        failStreakRef.current = 0;
+        resultsRef.current.set(seq, t.trim() || previewText || null);
+        setSttStatus("ok");
+      } catch {
+        failStreakRef.current++;
+        // Repli : l'aperçu du navigateur s'il existe. L'audio complet reste enregistré.
+        resultsRef.current.set(seq, previewText || null);
+        setSttStatus("error");
+      }
+      commitInOrder();
+    },
+    [commitInOrder],
+  );
+
+  const startSegment = useCallback(() => {
+    const stream = streamRef.current;
+    if (!stream || !transcribeRef.current) return;
+    let r: MediaRecorder;
+    try {
+      r = new MediaRecorder(stream, mimeRef.current ? { mimeType: mimeRef.current } : undefined);
+    } catch {
+      return;
+    }
+    const chunks: Blob[] = [];
+    r.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+    r.onstop = () => {
+      const meta = (r as any)._meta as { seq: number; voiced: number; prev: string } | undefined;
+      if (!meta) return;
+      sendSegment(meta.seq, new Blob(chunks, { type: r.mimeType || mimeRef.current || "audio/webm" }), meta.voiced, meta.prev);
+    };
+    r.start();
+    segRecRef.current = r;
+    segStartRef.current = Date.now();
+    segVoicedRef.current = 0;
+  }, [sendSegment]);
+
+  const cutSegment = useCallback(
+    (restart: boolean) => {
+      const r = segRecRef.current;
+      segRecRef.current = null;
+      if (r) {
+        const seq = seqRef.current++;
+        (r as any)._meta = { seq, voiced: segVoicedRef.current, prev: curPreviewRef.current.trim() };
+        curPreviewRef.current = "";
+        setPreview("");
+        setPendingCount(seqRef.current - nextCommitRef.current);
+        try {
+          if (r.state !== "inactive") r.stop();
+        } catch {
+          /* ignore */
+        }
+      }
+      if (restart) startSegment();
+    },
+    [startSegment],
+  );
+
+  /** Attend que tous les extraits envoyés soient transcrits (max 40 s). */
+  const waitForPending = useCallback(async () => {
+    const t0 = Date.now();
+    // laisse le temps au dernier extrait d'être finalisé par MediaRecorder
+    await new Promise((r) => setTimeout(r, 150));
+    while (seqRef.current > nextCommitRef.current && Date.now() - t0 < 40000) {
+      await new Promise((r) => setTimeout(r, 250));
+    }
+  }, []);
+
   // ----- Boucles (niveau sonore + chrono + inactivité) -----
   const loop = useCallback(() => {
     const an = analyserRef.current;
@@ -167,22 +311,37 @@ export function useRecorder(opts: { lang?: string; onFinal?: (text: string) => v
       for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
       const rms = Math.sqrt(sum / buf.length);
       setLevel(Math.min(1, rms * 6));
-      if (stateRef.current === "recording" && rms > thresholdRef.current) lastActivityRef.current = Date.now();
+      const now = Date.now();
+      const dt = Math.min(200, now - (lastFrameRef.current || now));
+      lastFrameRef.current = now;
+      if (stateRef.current === "recording") {
+        if (rms > thresholdRef.current) {
+          lastActivityRef.current = now;
+          lastLoudRef.current = now;
+          segVoicedRef.current += dt;
+        }
+        if (segRecRef.current) {
+          const dur = now - segStartRef.current;
+          const quiet = now - lastLoudRef.current;
+          if (dur >= SEG_MAX_MS || (dur >= SEG_MIN_MS && quiet >= QUIET_CUT_MS)) cutSegment(true);
+        }
+      }
     }
     rafRef.current = requestAnimationFrame(loop);
-  }, []);
+  }, [cutSegment]);
 
   const pause = useCallback(
     (reason: PauseReason = "manual") => {
       if (stateRef.current !== "recording") return;
       const rec = recorderRef.current;
       if (rec && rec.state === "recording") rec.pause();
+      cutSegment(false);
       streamRef.current?.getAudioTracks().forEach((t) => (t.enabled = false));
       stopSpeech();
       setPauseReason(reason);
       setS("paused");
     },
-    [stopSpeech],
+    [stopSpeech, cutSegment],
   );
 
   useEffect(() => {
@@ -224,6 +383,17 @@ export function useRecorder(opts: { lang?: string; onFinal?: (text: string) => v
       };
       rec.start(1000);
       recorderRef.current = rec;
+      mimeRef.current = rec.mimeType || mime;
+      seqRef.current = 0;
+      nextCommitRef.current = 0;
+      resultsRef.current.clear();
+      previewsRef.current.clear();
+      curPreviewRef.current = "";
+      failStreakRef.current = 0;
+      setPreview("");
+      setPendingPreview("");
+      setPendingCount(0);
+      setSttStatus(transcribeRef.current ? "ok" : "idle");
 
       const AC = window.AudioContext || (window as any).webkitAudioContext;
       const ctx: AudioContext = new AC();
@@ -248,6 +418,8 @@ export function useRecorder(opts: { lang?: string; onFinal?: (text: string) => v
       setAudioBlob(null);
       setPauseReason(null);
       setS("recording");
+      lastLoudRef.current = Date.now();
+      startSegment();
       startSpeech();
     } catch (e: any) {
       setS("idle");
@@ -256,7 +428,7 @@ export function useRecorder(opts: { lang?: string; onFinal?: (text: string) => v
       else if (e?.name === "NotFoundError") setMicError("Aucun micro détecté sur cet appareil.");
       else setMicError("Impossible de démarrer le micro : " + (e?.message || "erreur inconnue"));
     }
-  }, [loop, startSpeech]);
+  }, [loop, startSpeech, startSegment]);
 
   const resume = useCallback(() => {
     if (stateRef.current !== "paused") return;
@@ -268,13 +440,16 @@ export function useRecorder(opts: { lang?: string; onFinal?: (text: string) => v
     restartTimesRef.current = [];
     setPauseReason(null);
     setS("recording");
+    lastLoudRef.current = Date.now();
+    startSegment();
     startSpeech();
-  }, [startSpeech]);
+  }, [startSpeech, startSegment]);
 
   const stop = useCallback(() => {
     if (stateRef.current === "idle" || stateRef.current === "stopped") return;
     stopSpeech(true);
     recogRef.current = null;
+    cutSegment(false);
     const rec = recorderRef.current;
     if (rec && rec.state !== "inactive") rec.stop();
     streamRef.current?.getTracks().forEach((t) => t.stop());
@@ -287,7 +462,7 @@ export function useRecorder(opts: { lang?: string; onFinal?: (text: string) => v
     setSpeechStatus((s) => (s === "unsupported" ? s : "off"));
     setPauseReason(null);
     setS("stopped");
-  }, [stopSpeech]);
+  }, [stopSpeech, cutSegment]);
   const stopRef = useRef(stop);
   stopRef.current = stop;
 
@@ -325,6 +500,11 @@ export function useRecorder(opts: { lang?: string; onFinal?: (text: string) => v
     micError,
     audioBlob,
     silenceLeft,
+    sttStatus,
+    pendingCount,
+    pendingPreview,
+    preview,
+    waitForPending,
     setThreshold: (v: number) => (thresholdRef.current = v),
     start,
     pause: () => pause("manual"),
