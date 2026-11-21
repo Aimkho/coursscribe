@@ -7,9 +7,9 @@ const COURSE_COLS = `
   c.is_public as "isPublic", c.has_audio as "hasAudio", c.status, c.created_at as "createdAt", c.updated_at as "updatedAt",
   c.transcript_updated_at as "transcriptUpdatedAt", c.analyzed_at as "analyzedAt",
   c.notes, c.sheet, c.exercises, c.exam`;
-const COURSE_FROM = `from coursscribe.courses c
-  join coursscribe.users u on u.id = c.owner_id
-  left join coursscribe.subjects s on s.id = c.subject_id`;
+const COURSE_FROM = `from public.courses c
+  join public.users u on u.id = c.owner_id
+  left join public.subjects s on s.id = c.subject_id`;
 // Ordre : matière, puis numéro de chapitre, puis date
 const COURSE_ORDER = `order by coalesce(c.updated_at, c.created_at) desc`;
 
@@ -43,7 +43,7 @@ export async function toCourse(row: CourseRow, viewerId: number): Promise<Course
     storage.listCourseSessions(row.id),
     row.subjectId
       ? q(
-          `select id, title, chapter_number as "chapterNumber" from coursscribe.courses
+          `select id, title, chapter_number as "chapterNumber" from public.courses
            where subject_id = $1 and (owner_id = $2 or is_public) order by chapter_number nulls last, created_at`,
           [row.subjectId, viewerId],
         )
@@ -97,30 +97,30 @@ const JSON_COLS = new Set(["notes", "sheet", "exercises", "exam"]);
 
 export const storage = {
   async getUserByEmail(email: string): Promise<User | undefined> {
-    return one(`select id, email, name, password_hash as "passwordHash" from coursscribe.users where email = $1`, [email]);
+    return one(`select id, email, name, password_hash as "passwordHash" from public.users where email = $1`, [email]);
   },
   async getUser(id: number): Promise<User | undefined> {
-    return one(`select id, email, name, password_hash as "passwordHash" from coursscribe.users where id = $1`, [id]);
+    return one(`select id, email, name, password_hash as "passwordHash" from public.users where id = $1`, [id]);
   },
   async createUser(data: { email: string; name: string; passwordHash: string }): Promise<User> {
     return (await one(
-      `insert into coursscribe.users (email, name, password_hash) values ($1, $2, $3)
+      `insert into public.users (email, name, password_hash) values ($1, $2, $3)
        returning id, email, name, password_hash as "passwordHash"`,
       [data.email, data.name, data.passwordHash],
     ))!;
   },
   async createSession(token: string, userId: number) {
-    await q(`insert into coursscribe.sessions (token, user_id) values ($1, $2)`, [token, userId]);
+    await q(`insert into public.sessions (token, user_id) values ($1, $2)`, [token, userId]);
   },
   async getSessionUser(token: string): Promise<User | undefined> {
     return one(
       `select u.id, u.email, u.name, u.password_hash as "passwordHash"
-       from coursscribe.sessions s join coursscribe.users u on u.id = s.user_id where s.token = $1`,
+       from public.sessions s join public.users u on u.id = s.user_id where s.token = $1`,
       [token],
     );
   },
   async deleteSession(token: string) {
-    await q(`delete from coursscribe.sessions where token = $1`, [token]);
+    await q(`delete from public.sessions where token = $1`, [token]);
   },
 
   // ---------- Matières ----------
@@ -129,49 +129,49 @@ export const storage = {
       `select s.id, s.name, s.level, s.created_at as "createdAt",
               count(c.id)::int as "chapterCount",
               max(coalesce(c.updated_at, c.created_at)) as "lastActivity"
-       from coursscribe.subjects s left join coursscribe.courses c on c.subject_id = s.id
+       from public.subjects s left join public.courses c on c.subject_id = s.id
        where s.owner_id = $1 group by s.id order by max(coalesce(c.updated_at, c.created_at)) desc nulls last, s.name`,
       [ownerId],
     );
   },
   async getSubject(id: number, ownerId: number) {
     return one<{ id: number; name: string; level: string }>(
-      `select id, name, level from coursscribe.subjects where id = $1 and owner_id = $2`,
+      `select id, name, level from public.subjects where id = $1 and owner_id = $2`,
       [id, ownerId],
     );
   },
   async findOrCreateSubject(ownerId: number, name: string, level = "") {
     const clean = name.trim();
     const found = await one<{ id: number; name: string; level: string }>(
-      `select id, name, level from coursscribe.subjects where owner_id = $1 and lower(name) = lower($2)`,
+      `select id, name, level from public.subjects where owner_id = $1 and lower(name) = lower($2)`,
       [ownerId, clean],
     );
     if (found) {
-      if (level && !found.level) await q(`update coursscribe.subjects set level = $1 where id = $2`, [level, found.id]);
+      if (level && !found.level) await q(`update public.subjects set level = $1 where id = $2`, [level, found.id]);
       return found;
     }
     return (await one<{ id: number; name: string; level: string }>(
-      `insert into coursscribe.subjects (owner_id, name, level, created_at) values ($1, $2, $3, $4)
+      `insert into public.subjects (owner_id, name, level, created_at) values ($1, $2, $3, $4)
        on conflict (owner_id, lower(name)) do update set name = excluded.name returning id, name, level`,
       [ownerId, clean, level, Date.now()],
     ))!;
   },
   async renameSubject(id: number, ownerId: number, name: string, level?: string) {
     const r = await one(
-      `update coursscribe.subjects set name = $3, level = coalesce($4, level) where id = $1 and owner_id = $2 returning id`,
+      `update public.subjects set name = $3, level = coalesce($4, level) where id = $1 and owner_id = $2 returning id`,
       [id, ownerId, name.trim(), level ?? null],
     );
-    if (r) await q(`update coursscribe.courses set subject = $2 where subject_id = $1`, [id, name.trim()]);
+    if (r) await q(`update public.courses set subject = $2 where subject_id = $1`, [id, name.trim()]);
     return r;
   },
   async deleteSubject(id: number, ownerId: number) {
     // Les chapitres sont conservés (subject_id passe à null, le nom reste en texte).
-    const r = await q(`delete from coursscribe.subjects where id = $1 and owner_id = $2 returning id`, [id, ownerId]);
+    const r = await q(`delete from public.subjects where id = $1 and owner_id = $2 returning id`, [id, ownerId]);
     return r.length > 0;
   },
   async nextChapterNumber(subjectId: number) {
     const r = await one<{ n: number }>(
-      `select coalesce(max(chapter_number), 0)::int + 1 as n from coursscribe.courses where subject_id = $1`,
+      `select coalesce(max(chapter_number), 0)::int + 1 as n from public.courses where subject_id = $1`,
       [subjectId],
     );
     return r?.n ?? 1;
@@ -180,14 +180,14 @@ export const storage = {
   // ---------- Cours ----------
   async listMyCourses(ownerId: number) {
     return q<CourseRow & { sessionCount: number }>(
-      `select ${COURSE_COLS}, (select count(*)::int from coursscribe.course_sessions cs where cs.course_id = c.id) as "sessionCount"
+      `select ${COURSE_COLS}, (select count(*)::int from public.course_sessions cs where cs.course_id = c.id) as "sessionCount"
        ${COURSE_FROM} where c.owner_id = $1 ${COURSE_ORDER}`,
       [ownerId],
     );
   },
   async listPublicCourses() {
     return q<CourseRow & { sessionCount: number }>(
-      `select ${COURSE_COLS}, (select count(*)::int from coursscribe.course_sessions cs where cs.course_id = c.id) as "sessionCount"
+      `select ${COURSE_COLS}, (select count(*)::int from public.course_sessions cs where cs.course_id = c.id) as "sessionCount"
        ${COURSE_FROM} where c.is_public ${COURSE_ORDER} limit 300`,
     );
   },
@@ -207,7 +207,7 @@ export const storage = {
   }): Promise<CourseRow> {
     const now = Date.now();
     const r = await one<{ id: number }>(
-      `insert into coursscribe.courses (owner_id, title, subject, level, transcript, duration_sec, subject_id, chapter_number, created_at, updated_at, transcript_updated_at)
+      `insert into public.courses (owner_id, title, subject, level, transcript, duration_sec, subject_id, chapter_number, created_at, updated_at, transcript_updated_at)
        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9,$9) returning id`,
       [data.ownerId, data.title, data.subject, data.level, data.transcript, data.durationSec, data.subjectId, data.chapterNumber, now],
     );
@@ -229,13 +229,13 @@ export const storage = {
     vals.push(Date.now());
     sets.push(`updated_at = $${vals.length}`);
     const r = await one<{ id: number }>(
-      `update coursscribe.courses set ${sets.join(", ")} where id = $1 and owner_id = $2 returning id`,
+      `update public.courses set ${sets.join(", ")} where id = $1 and owner_id = $2 returning id`,
       vals,
     );
     return r ? this.getCourse(r.id) : undefined;
   },
   async deleteCourse(id: number, ownerId: number) {
-    const r = await q(`delete from coursscribe.courses where id = $1 and owner_id = $2 returning id`, [id, ownerId]);
+    const r = await q(`delete from public.courses where id = $1 and owner_id = $2 returning id`, [id, ownerId]);
     return r.length > 0;
   },
 
@@ -243,7 +243,7 @@ export const storage = {
   async listCourseSessions(courseId: number): Promise<CourseSession[]> {
     return q(
       `select id, idx, started_at as "startedAt", duration_sec as "durationSec", word_count as "wordCount", has_audio as "hasAudio"
-       from coursscribe.course_sessions where course_id = $1 order by idx`,
+       from public.course_sessions where course_id = $1 order by idx`,
       [courseId],
     );
   },
@@ -253,8 +253,8 @@ export const storage = {
       await client.query("begin");
       await client.query(`select pg_advisory_xact_lock($1)`, [courseId]);
       const r = await client.query(
-        `insert into coursscribe.course_sessions (course_id, idx, started_at)
-         values ($1, (select coalesce(max(idx), 0) + 1 from coursscribe.course_sessions where course_id = $1), $2)
+        `insert into public.course_sessions (course_id, idx, started_at)
+         values ($1, (select coalesce(max(idx), 0) + 1 from public.course_sessions where course_id = $1), $2)
          returning id, idx, started_at as "startedAt", duration_sec as "durationSec", word_count as "wordCount", has_audio as "hasAudio"`,
         [courseId, startedAt],
       );
@@ -269,7 +269,7 @@ export const storage = {
   },
   async updateCourseSession(courseId: number, sessionId: number, patch: { durationSec?: number; wordCount?: number; hasAudio?: boolean }) {
     return one<CourseSession>(
-      `update coursscribe.course_sessions set
+      `update public.course_sessions set
          duration_sec = coalesce($3, duration_sec), word_count = coalesce($4, word_count), has_audio = coalesce($5, has_audio)
        where id = $2 and course_id = $1
        returning id, idx, started_at as "startedAt", duration_sec as "durationSec", word_count as "wordCount", has_audio as "hasAudio"`,
@@ -279,13 +279,13 @@ export const storage = {
   async getCourseSession(courseId: number, sessionId: number) {
     return one<CourseSession>(
       `select id, idx, started_at as "startedAt", duration_sec as "durationSec", word_count as "wordCount", has_audio as "hasAudio"
-       from coursscribe.course_sessions where id = $2 and course_id = $1`,
+       from public.course_sessions where id = $2 and course_id = $1`,
       [courseId, sessionId],
     );
   },
   async recomputeDuration(courseId: number) {
     await q(
-      `update coursscribe.courses set duration_sec = (select coalesce(sum(duration_sec),0) from coursscribe.course_sessions where course_id = $1) where id = $1`,
+      `update public.courses set duration_sec = (select coalesce(sum(duration_sec),0) from public.course_sessions where course_id = $1) where id = $1`,
       [courseId],
     );
   },

@@ -228,7 +228,7 @@ export default function CoursePage({ id, publicView }: { id: number; publicView?
             <Textarea
               value={draft ?? course.transcript}
               onChange={(e) => setDraft(e.target.value)}
-              className="min-h-[480px] resize-y rounded-none border-0 px-5 py-4 text-[15px] leading-7 shadow-none focus-visible:ring-0"
+              className="min-h-[480px] resize-y rounded-none border-0 px-5 py-4 text-base leading-7 md:text-[15px] shadow-none focus-visible:ring-0"
               data-testid="textarea-course-transcript"
             />
           ) : (
@@ -372,7 +372,7 @@ export default function CoursePage({ id, publicView }: { id: number; publicView?
               <span className="text-sm font-medium">{course.isPublic ? "Publié" : "Publier"}</span>
               <Switch checked={course.isPublic} onCheckedChange={togglePublic} data-testid="switch-public" aria-label="Publier dans la bibliothèque" />
             </label>
-            <Button variant="outline" size="icon" onClick={() => window.print()} aria-label="Imprimer" title="Imprimer ou enregistrer en PDF" data-testid="button-print">
+            <Button variant="outline" size="icon" className="hidden sm:inline-flex" onClick={() => window.print()} aria-label="Imprimer" title="Imprimer ou enregistrer en PDF" data-testid="button-print">
               <Printer className="h-4 w-4" />
             </Button>
             <Button

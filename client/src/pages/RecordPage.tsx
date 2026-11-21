@@ -428,7 +428,7 @@ export default function RecordPage({ continueId, subjectId: presetSubject }: { c
                         setChapterTouched(false);
                       }}
                       data-testid="select-subject"
-                      className="flex h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
+                      className="flex h-10 w-full rounded-md border border-input bg-background px-2 text-base md:h-9 md:text-sm"
                     >
                       <option value="">Sans matière</option>
                       {(subjects || []).map((s) => (
@@ -478,7 +478,7 @@ export default function RecordPage({ continueId, subjectId: presetSubject }: { c
                     value={level}
                     onChange={(e) => setLevel(e.target.value)}
                     data-testid="select-level"
-                    className="flex h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
+                    className="flex h-10 w-full rounded-md border border-input bg-background px-2 text-base md:h-9 md:text-sm"
                   >
                     <option value="">Choisir…</option>
                     {LEVELS.map((l) => (
@@ -592,6 +592,7 @@ export default function RecordPage({ continueId, subjectId: presetSubject }: { c
               <p className="mt-3 flex gap-2 text-xs leading-5 text-muted-foreground">
                 <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
                 Transcription par IA sur ton micro, extrait par extrait (quelques secondes de décalage). Fonctionne sur Chrome, Edge, Firefox et Safari.
+                <span className="lg:hidden"> Sur téléphone ou tablette, garde CoursScribe ouvert au premier plan : l'écran reste allumé pendant l'enregistrement.</span>
               </p>
             )}
 
@@ -734,7 +735,7 @@ export default function RecordPage({ continueId, subjectId: presetSubject }: { c
                   ? "La suite du cours apparaîtra ici pendant l'enregistrement."
                   : "Le texte du cours apparaîtra ici pendant l'enregistrement.\n\nTu peux aussi coller directement une transcription existante."
               }
-              className="min-h-[360px] flex-1 resize-none rounded-none border-0 px-5 py-4 text-[15px] leading-7 shadow-none focus-visible:ring-0"
+              className="min-h-[360px] flex-1 resize-none rounded-none border-0 px-5 py-4 text-base leading-7 shadow-none focus-visible:ring-0 md:text-[15px]"
               data-testid="textarea-transcript"
             />
             {(rec.pendingPreview || rec.preview || rec.interim) && (

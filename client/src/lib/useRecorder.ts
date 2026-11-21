@@ -482,6 +482,37 @@ export function useRecorder(
   const stopRef = useRef(stop);
   stopRef.current = stop;
 
+  // ----- Écran allumé pendant l'enregistrement (téléphone / tablette) -----
+  // Sans cela, la mise en veille automatique de l'écran coupe le micro au bout de quelques secondes.
+  useEffect(() => {
+    const nav: any = navigator;
+    if (state !== "recording" || !nav.wakeLock?.request) return;
+    let lock: any = null;
+    let cancelled = false;
+    const acquire = async () => {
+      try {
+        if (document.visibilityState !== "visible" || cancelled) return;
+        lock = await nav.wakeLock.request("screen");
+      } catch {
+        /* refusé (économie d'énergie) : sans effet bloquant */
+      }
+    };
+    const onVis = () => {
+      if (document.visibilityState === "visible") acquire();
+    };
+    acquire();
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      cancelled = true;
+      document.removeEventListener("visibilitychange", onVis);
+      try {
+        lock?.release();
+      } catch {
+        /* ignore */
+      }
+    };
+  }, [state]);
+
   const reset = useCallback(() => {
     setAudioBlob(null);
     setElapsed(0);

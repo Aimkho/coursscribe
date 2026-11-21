@@ -59,6 +59,20 @@ const h =
 function audioPath(courseId: number, sessionId?: number) {
   return path.join(UPLOAD_DIR, sessionId ? `${courseId}-s${sessionId}.webm` : `${courseId}.webm`);
 }
+/** Détecte le format réel (Chrome/Android : webm, iPhone/iPad Safari : mp4) et sert le fichier avec gestion des plages (requis par Safari). */
+function serveAudio(req: Request, res: Response, file: string, baseName: string) {
+  const head = Buffer.alloc(12);
+  const fd = fs.openSync(file, "r");
+  fs.readSync(fd, head, 0, 12, 0);
+  fs.closeSync(fd);
+  const isMp4 = head.toString("latin1", 4, 8) === "ftyp";
+  const isOgg = head.toString("latin1", 0, 4) === "OggS";
+  const isMp3 = head.toString("latin1", 0, 3) === "ID3" || (head[0] === 0xff && (head[1] & 0xe0) === 0xe0);
+  const [type, ext] = isMp4 ? ["audio/mp4", "m4a"] : isOgg ? ["audio/ogg", "ogg"] : isMp3 ? ["audio/mpeg", "mp3"] : ["audio/webm", "webm"];
+  const headers: Record<string, string> = { "Content-Type": type, "Cache-Control": "private, no-store" };
+  if (req.query.download) headers["Content-Disposition"] = `attachment; filename="${baseName}.${ext}"`;
+  res.sendFile(path.resolve(file), { headers, acceptRanges: true });
+}
 const wc = (t: string) => (t.trim() ? t.trim().split(/\s+/).length : 0);
 
 function publicUser(u: User) {
@@ -360,9 +374,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     if (!row) return;
     const file = audioPath(row.id, Number(req.params.sid));
     if (!fs.existsSync(file)) return res.status(404).end();
-    res.setHeader("Content-Type", "audio/webm");
-    if (req.query.download) res.setHeader("Content-Disposition", `attachment; filename="cours-${row.id}-seance-${req.params.sid}.webm"`);
-    fs.createReadStream(file).pipe(res);
+    serveAudio(req, res, file, `cours-${row.id}-seance-${req.params.sid}`);
   }));
 
   // ---------- Exports PDF / Word / PowerPoint ----------
@@ -445,9 +457,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     if (!row) return;
     const file = audioPath(row.id);
     if (!fs.existsSync(file)) return res.status(404).end();
-    res.setHeader("Content-Type", "audio/webm");
-    if (req.query.download) res.setHeader("Content-Disposition", `attachment; filename="cours-${row.id}.webm"`);
-    fs.createReadStream(file).pipe(res);
+    serveAudio(req, res, file, `cours-${row.id}`);
   }));
 
   // ---------- Import d'un enregistrement audio (fichier du téléphone, dictaphone…) ----------

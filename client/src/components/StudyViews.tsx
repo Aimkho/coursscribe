@@ -743,7 +743,7 @@ export function ExamView({ exam, courseId }: { exam: Exam; courseId: number }) {
                     <Textarea
                       value={answers[q.id] ?? ""}
                       onChange={(e) => setAnswers((a) => ({ ...a, [q.id]: e.target.value }))}
-                      className="mt-3 min-h-[140px] text-sm leading-6"
+                      className="mt-3 min-h-[140px] text-base leading-6 md:text-sm"
                       placeholder="Ta réponse…"
                       data-testid={`exam-answer-${q.id}`}
                     />

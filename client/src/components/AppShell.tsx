@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { Link, useLocation } from "wouter";
-import { BookOpen, Globe2, LogOut, Mic, LayoutGrid } from "lucide-react";
+import { Globe2, LogOut, Mic, LayoutGrid } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { cn } from "@/lib/utils";
 
@@ -13,8 +13,8 @@ const NAV = [
 export function BrandMark({ className }: { className?: string }) {
   return (
     <div className={cn("flex items-center gap-2.5", className)}>
-      <span className="grid h-9 w-9 place-items-center rounded-xl bg-primary text-primary-foreground">
-        <BookOpen className="h-[18px] w-[18px]" strokeWidth={2.2} />
+      <span className="grid h-10 w-10 shrink-0 place-items-center overflow-hidden rounded-xl bg-white ring-1 ring-black/5">
+        <img src="./logo-mark.png" alt="" width={34} height={34} className="h-[34px] w-[34px] object-contain" />
       </span>
       <span className="font-display text-lg font-bold tracking-tight">
         Cours<span className="text-primary">Scribe</span>
@@ -96,12 +96,12 @@ export function AppShell({ children }: { children: ReactNode }) {
         </button>
       </header>
 
-      <main className="pb-24 lg:pb-10 lg:pl-64">
+      <main className="pb-[calc(6rem+env(safe-area-inset-bottom))] lg:pb-10 lg:pl-64">
         <div className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6 lg:px-10 lg:py-10">{children}</div>
       </main>
 
       {/* Navigation basse mobile */}
-      <nav className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-3 border-t border-border bg-background lg:hidden" aria-label="Navigation">
+      <nav className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-3 border-t border-border bg-background pb-[env(safe-area-inset-bottom)] lg:hidden" aria-label="Navigation">
         {NAV.map((n) => {
           const active = isActive(loc, n.href);
           return (
