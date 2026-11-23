@@ -1,0 +1,9 @@
+.env
+.env.*
+!.env.example
+uploads
+data.db*
+gen-errors.log
+dist
+node_modules
+.vercel
