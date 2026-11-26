@@ -63,6 +63,13 @@ async function main() {
       {
         version: 3,
         routes: [
+          // Adresse principale : www.coursscribe.com (l'API reste joignable partout, pour le webhook Stripe)
+          {
+            src: "^/(?!api/)(.*)$",
+            has: [{ type: "host", value: "coursscribe.vercel.app" }],
+            status: 308,
+            headers: { Location: "https://www.coursscribe.com/$1" },
+          },
           { src: "^/api/(.*)$", dest: "/api?__p=$1" },
           { src: "^/assets/(.*)$", headers: { "Cache-Control": "public, max-age=31536000, immutable" }, continue: true },
           { handle: "filesystem" },
