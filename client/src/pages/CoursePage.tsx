@@ -48,6 +48,8 @@ import { formatDuration } from "@/lib/useRecorder";
 import { formatDate, StatusBadge } from "@/components/CourseCard";
 import { NotesView, SheetView, ExercisesView, ExamView } from "@/components/StudyViews";
 import { ClassExercisesView } from "@/components/ClassExercises";
+import { useDocImport, DocImportProgress, docBlock, summarizeDocs } from "@/components/DocImport";
+import { DOC_ACCEPT } from "@/lib/docImport";
 import { autoAnalyze } from "./RecordPage";
 
 type Kind = "notes" | "class" | "sheet" | "exercises" | "exam";
@@ -126,6 +128,28 @@ export default function CoursePage({ id, publicView }: { id: number; publicView?
         n.delete(kind);
         return n;
       });
+    }
+  }
+
+  const docs = useDocImport();
+  const docNames = Array.from(new Set(Array.from((course?.transcript ?? "").matchAll(/^\[Document : (.+)\]$/gm), (m) => m[1])));
+  async function addDocuments(files: File[]) {
+    if (!files.length || !course) return;
+    const { docs: list, note } = await docs.run(files, [course.subject, course.title].filter(Boolean).join(" — "), course.transcript);
+    if (!list.length) return;
+    // Relit le cours juste avant d'écrire, pour ne rien écraser
+    const fresh: Course = await (await apiRequest("GET", `/api/courses/${course.id}`)).json();
+    const transcript = (fresh.transcript.trim() ? fresh.transcript.trimEnd() + "\n\n" : "") + list.map(docBlock).join("\n\n");
+    try {
+      const r = await apiRequest("PATCH", `/api/courses/${course.id}`, { transcript });
+      queryClient.setQueryData(["/api/courses", id], await r.json());
+      queryClient.invalidateQueries({ queryKey: ["/api/courses"] });
+      toast({
+        title: list.length > 1 ? "Documents ajoutés au cours" : "Document ajouté au cours",
+        description: `${summarizeDocs(list)} ${fresh.notes ? "Clique sur « Mettre à jour » pour en tenir compte dans les notes, la fiche, les exercices et l'examen." : "Lance l'analyse pour générer les notes."}${note ? ` ${note}` : ""}`,
+      });
+    } catch (e: any) {
+      toast({ title: "Ajout impossible", description: e.message, variant: "destructive" });
     }
   }
 
@@ -461,6 +485,25 @@ export default function CoursePage({ id, publicView }: { id: number; publicView?
               </Link>
             </Button>
           )}
+          {owner && (
+            <Button variant="outline" asChild disabled={!!docs.state} data-testid="button-add-docs">
+              <label className={cn("cursor-pointer", docs.state && "pointer-events-none opacity-50")}>
+                <FileText className="mr-2 h-4 w-4" /> Ajouter des documents
+                <input
+                  type="file"
+                  multiple
+                  accept={DOC_ACCEPT}
+                  className="sr-only"
+                  onChange={(e) => {
+                    const fs = Array.from(e.target.files ?? []);
+                    e.target.value = "";
+                    addDocuments(fs);
+                  }}
+                  data-testid="input-add-docs"
+                />
+              </label>
+            </Button>
+          )}
           <ExportDialog course={course} exSet={currentSet("exercises")?.id} examSet={currentSet("exam")?.id} />
           {owner && (
             <>
@@ -501,11 +544,29 @@ export default function CoursePage({ id, publicView }: { id: number; publicView?
         </div>
       </header>
 
+      {owner && docNames.length > 0 && (
+        <p className="no-print -mt-2 mb-6 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground" data-testid="list-docs">
+          <FileText className="h-3.5 w-3.5 text-primary" />
+          <span className="font-medium text-foreground">{docNames.length > 1 ? `${docNames.length} documents inclus :` : "Document inclus :"}</span>
+          {docNames.map((n) => (
+            <span key={n} className="rounded-full bg-secondary px-2 py-0.5 text-secondary-foreground">
+              {n}
+            </span>
+          ))}
+        </p>
+      )}
+
+      {docs.state && (
+        <div className="no-print mb-6">
+          <DocImportProgress state={docs.state} onCancel={docs.cancel} />
+        </div>
+      )}
+
       {owner && course.analysisStale && course.notes && (
         <div className="no-print mb-6 flex flex-col gap-3 rounded-2xl border border-[#FE277E]/30 bg-[#FE277E]/5 p-4 sm:flex-row sm:items-center sm:justify-between sm:px-5" data-testid="banner-stale">
           <div>
             <p className="text-sm font-semibold text-[#8A0D1E]">Le cours a évolué depuis la dernière analyse</p>
-            <p className="text-sm text-muted-foreground">De nouvelles séances ont été ajoutées. Mets à jour les notes, la fiche, les exercices et l'examen pour couvrir tout le chapitre.</p>
+            <p className="text-sm text-muted-foreground">De nouvelles séances ou de nouveaux documents ont été ajoutés. Mets à jour les notes, la fiche, les exercices et l'examen pour couvrir tout le chapitre.</p>
           </div>
           <Button onClick={regenerateAll} disabled={anyPending} className="shrink-0" data-testid="button-update-analysis">
             {anyPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}

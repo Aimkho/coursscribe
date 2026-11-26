@@ -26,7 +26,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { ExerciseRecordPanel } from "@/components/ClassExercises";
-import { extractDocument, DOC_ACCEPT, type DocProgress } from "@/lib/docImport";
+import { DOC_ACCEPT } from "@/lib/docImport";
+import { useDocImport, DocImportProgress, docBlock, summarizeDocs } from "@/components/DocImport";
 import { useRecorder, formatDuration } from "@/lib/useRecorder";
 import { apiRequest, apiUploadSessionAudio, apiTranscribe, apiTranscribeFile, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
@@ -104,8 +105,8 @@ export default function RecordPage({ continueId, subjectId: presetSubject }: { c
   const transcriptRef = useRef<HTMLTextAreaElement>(null);
   const followRef = useRef(true);
   const importCancel = useRef({ cancelled: false });
-  const [docImport, setDocImport] = useState<null | ({ name: string } & DocProgress)>(null);
-  const docCancel = useRef({ cancelled: false });
+  const docs = useDocImport();
+  const docImport = docs.state;
 
   // Identifiants côté serveur (créés à la première sauvegarde)
   const courseIdRef = useRef<number | null>(continueId ?? null);
@@ -350,32 +351,18 @@ export default function RecordPage({ continueId, subjectId: presetSubject }: { c
     }
   }
 
-  async function importDocument(file: File) {
-    docCancel.current = { cancelled: false };
-    setDocImport({ name: file.name, step: "Ouverture du fichier…", done: 0, total: 0 });
-    try {
-      const ctx = [metaRef.current.subject, metaRef.current.title].filter(Boolean).join(" — ");
-      const r = await extractDocument(file, ctx, (p) => setDocImport({ name: file.name, ...p }), docCancel.current);
-      if (docCancel.current.cancelled) return;
-      const text = r.text.trim();
-      if (wordCount(text) < 5) {
-        toast({ title: "Aucun texte trouvé", description: "Le document semble vide ou illisible." });
-        return;
-      }
-      const label = file.name.replace(/\.[^.]+$/, "");
-      setTranscript((p) => (p.trim() ? p.trimEnd() + "\n\n" : "") + `[Document : ${label}]\n` + text);
-      if (!title && !continuing) setTitle(label);
-      const n = wordCount(text);
-      toast({
-        title: "Document importé",
-        description: `${n.toLocaleString("fr-FR")} mots ajoutés${r.pages > 1 ? ` (${r.pages} pages${r.scanned ? `, dont ${r.scanned} lues par l'IA` : ""})` : ""}. Tu peux ensuite lancer l'analyse.`,
-      });
-      setTimeout(() => saveRef.current(false), 100);
-    } catch (e: any) {
-      if (!docCancel.current.cancelled) toast({ title: "Import impossible", description: e.message, variant: "destructive" });
-    } finally {
-      setDocImport(null);
-    }
+  async function importDocuments(files: File[]) {
+    if (!files.length) return;
+    const ctx = [metaRef.current.subject, metaRef.current.title].filter(Boolean).join(" — ");
+    const { docs: list, note } = await docs.run(files, ctx, (baseCourse?.transcript ?? "") + "\n" + metaRef.current.transcript);
+    if (!list.length) return;
+    setTranscript((p) => (p.trim() ? p.trimEnd() + "\n\n" : "") + list.map(docBlock).join("\n\n"));
+    if (!title && !continuing) setTitle(list[0].label);
+    toast({
+      title: list.length > 1 ? "Documents importés" : "Document importé",
+      description: `${summarizeDocs(list)} ${continuing ? "Ils complètent le cours." : "Tu peux en ajouter d'autres, enregistrer le prof, puis lancer l'analyse."}${note ? ` ${note}` : ""}`,
+    });
+    setTimeout(() => saveRef.current(false), 100);
   }
 
   async function openInNewTab() {
@@ -564,7 +551,7 @@ export default function RecordPage({ continueId, subjectId: presetSubject }: { c
 
             <div className="flex gap-2">
               {(rec.state === "idle" || rec.state === "starting") && (
-                <Button className="h-12 flex-1 text-base" onClick={rec.start} disabled={rec.state === "starting" || !!importing} data-testid="button-start">
+                <Button className="h-12 flex-1 text-base" onClick={rec.start} disabled={rec.state === "starting" || !!importing || !!docImport} data-testid="button-start">
                   {rec.state === "starting" ? <Loader2 className="mr-2 h-5 w-5 animate-spin" /> : <Mic className="mr-2 h-5 w-5" />}
                   {continuing ? `Démarrer la séance ${nextIdx}` : "Démarrer"}
                 </Button>
@@ -701,54 +688,29 @@ export default function RecordPage({ continueId, subjectId: presetSubject }: { c
             {/* Import d'un support de cours : PDF, Word, PowerPoint, photo */}
             <div className="mt-2">
               {docImport ? (
-                <div className="rounded-lg border border-border px-3 py-2.5" data-testid="status-import-doc">
-                  <div className="flex items-center justify-between gap-2 text-sm">
-                    <span className="inline-flex min-w-0 items-center gap-2">
-                      <Loader2 className="h-4 w-4 shrink-0 animate-spin text-primary" />
-                      <span className="truncate">{docImport.name}</span>
-                    </span>
-                    <button
-                      className="text-xs text-muted-foreground hover:text-foreground"
-                      onClick={() => {
-                        docCancel.current.cancelled = true;
-                        setDocImport(null);
-                      }}
-                    >
-                      Annuler
-                    </button>
-                  </div>
-                  <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-muted">
-                    <div
-                      className="h-full rounded-full bg-primary transition-[width]"
-                      style={{ width: `${docImport.total ? Math.max(4, (docImport.done / docImport.total) * 100) : 4}%` }}
-                    />
-                  </div>
-                  <p className="mt-1.5 text-xs text-muted-foreground">
-                    {docImport.step}
-                    {docImport.total > 1 ? ` ${docImport.done} / ${docImport.total}` : ""}
-                  </p>
-                </div>
+                <DocImportProgress state={docImport} onCancel={docs.cancel} />
               ) : (
                 <label
                   className={cn(
                     "flex cursor-pointer items-center gap-2.5 rounded-lg border border-dashed border-border px-3 py-2.5 text-sm hover:border-primary/40 hover:bg-muted/50",
-                    (live || !!importing) && "pointer-events-none opacity-50",
+                    (recording || rec.state === "starting" || !!importing) && "pointer-events-none opacity-50",
                   )}
                 >
                   <FileText className="h-4 w-4 shrink-0 text-primary" />
                   <span className="min-w-0">
-                    <span className="font-medium">Importer un cours en PDF ou Word</span>
-                    <span className="block text-xs text-muted-foreground">PDF, Word, PowerPoint ou photo du polycopié : le texte est ajouté au cours</span>
+                    <span className="font-medium">Importer des documents de cours</span>
+                    <span className="block text-xs text-muted-foreground">{continuing ? "PDF, Word, PowerPoint ou photos, plusieurs à la fois : ils complètent le cours" : "PDF, Word, PowerPoint ou photos, plusieurs à la fois : seuls ou avec l'enregistrement"}</span>
                   </span>
                   <input
                     type="file"
                     accept={DOC_ACCEPT}
+                    multiple
                     className="sr-only"
-                    disabled={live || !!importing}
+                    disabled={recording || rec.state === "starting" || !!importing}
                     onChange={(e) => {
-                      const f = e.target.files?.[0];
+                      const fs = Array.from(e.target.files ?? []);
                       e.target.value = "";
-                      if (f) importDocument(f);
+                      importDocuments(fs);
                     }}
                     data-testid="input-import-doc"
                   />
