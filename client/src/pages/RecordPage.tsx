@@ -8,6 +8,7 @@ import {
   CloudUpload,
   ExternalLink,
   FileAudio,
+  FileText,
   History,
   Info,
   Loader2,
@@ -25,6 +26,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { ExerciseRecordPanel } from "@/components/ClassExercises";
+import { extractDocument, DOC_ACCEPT, type DocProgress } from "@/lib/docImport";
 import { useRecorder, formatDuration } from "@/lib/useRecorder";
 import { apiRequest, apiUploadSessionAudio, apiTranscribe, apiTranscribeFile, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
@@ -102,6 +104,8 @@ export default function RecordPage({ continueId, subjectId: presetSubject }: { c
   const transcriptRef = useRef<HTMLTextAreaElement>(null);
   const followRef = useRef(true);
   const importCancel = useRef({ cancelled: false });
+  const [docImport, setDocImport] = useState<null | ({ name: string } & DocProgress)>(null);
+  const docCancel = useRef({ cancelled: false });
 
   // Identifiants côté serveur (créés à la première sauvegarde)
   const courseIdRef = useRef<number | null>(continueId ?? null);
@@ -343,6 +347,34 @@ export default function RecordPage({ continueId, subjectId: presetSubject }: { c
       if (!importCancel.current.cancelled) toast({ title: "Import impossible", description: e.message, variant: "destructive" });
     } finally {
       setImporting(null);
+    }
+  }
+
+  async function importDocument(file: File) {
+    docCancel.current = { cancelled: false };
+    setDocImport({ name: file.name, step: "Ouverture du fichier…", done: 0, total: 0 });
+    try {
+      const ctx = [metaRef.current.subject, metaRef.current.title].filter(Boolean).join(" — ");
+      const r = await extractDocument(file, ctx, (p) => setDocImport({ name: file.name, ...p }), docCancel.current);
+      if (docCancel.current.cancelled) return;
+      const text = r.text.trim();
+      if (wordCount(text) < 5) {
+        toast({ title: "Aucun texte trouvé", description: "Le document semble vide ou illisible." });
+        return;
+      }
+      const label = file.name.replace(/\.[^.]+$/, "");
+      setTranscript((p) => (p.trim() ? p.trimEnd() + "\n\n" : "") + `[Document : ${label}]\n` + text);
+      if (!title && !continuing) setTitle(label);
+      const n = wordCount(text);
+      toast({
+        title: "Document importé",
+        description: `${n.toLocaleString("fr-FR")} mots ajoutés${r.pages > 1 ? ` (${r.pages} pages${r.scanned ? `, dont ${r.scanned} lues par l'IA` : ""})` : ""}. Tu peux ensuite lancer l'analyse.`,
+      });
+      setTimeout(() => saveRef.current(false), 100);
+    } catch (e: any) {
+      if (!docCancel.current.cancelled) toast({ title: "Import impossible", description: e.message, variant: "destructive" });
+    } finally {
+      setDocImport(null);
     }
   }
 
@@ -666,6 +698,64 @@ export default function RecordPage({ continueId, subjectId: presetSubject }: { c
               )}
             </div>
 
+            {/* Import d'un support de cours : PDF, Word, PowerPoint, photo */}
+            <div className="mt-2">
+              {docImport ? (
+                <div className="rounded-lg border border-border px-3 py-2.5" data-testid="status-import-doc">
+                  <div className="flex items-center justify-between gap-2 text-sm">
+                    <span className="inline-flex min-w-0 items-center gap-2">
+                      <Loader2 className="h-4 w-4 shrink-0 animate-spin text-primary" />
+                      <span className="truncate">{docImport.name}</span>
+                    </span>
+                    <button
+                      className="text-xs text-muted-foreground hover:text-foreground"
+                      onClick={() => {
+                        docCancel.current.cancelled = true;
+                        setDocImport(null);
+                      }}
+                    >
+                      Annuler
+                    </button>
+                  </div>
+                  <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-muted">
+                    <div
+                      className="h-full rounded-full bg-primary transition-[width]"
+                      style={{ width: `${docImport.total ? Math.max(4, (docImport.done / docImport.total) * 100) : 4}%` }}
+                    />
+                  </div>
+                  <p className="mt-1.5 text-xs text-muted-foreground">
+                    {docImport.step}
+                    {docImport.total > 1 ? ` ${docImport.done} / ${docImport.total}` : ""}
+                  </p>
+                </div>
+              ) : (
+                <label
+                  className={cn(
+                    "flex cursor-pointer items-center gap-2.5 rounded-lg border border-dashed border-border px-3 py-2.5 text-sm hover:border-primary/40 hover:bg-muted/50",
+                    (live || !!importing) && "pointer-events-none opacity-50",
+                  )}
+                >
+                  <FileText className="h-4 w-4 shrink-0 text-primary" />
+                  <span className="min-w-0">
+                    <span className="font-medium">Importer un cours en PDF ou Word</span>
+                    <span className="block text-xs text-muted-foreground">PDF, Word, PowerPoint ou photo du polycopié : le texte est ajouté au cours</span>
+                  </span>
+                  <input
+                    type="file"
+                    accept={DOC_ACCEPT}
+                    className="sr-only"
+                    disabled={live || !!importing}
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      e.target.value = "";
+                      if (f) importDocument(f);
+                    }}
+                    data-testid="input-import-doc"
+                  />
+                </label>
+              )}
+            </div>
+
             <ExerciseRecordPanel
               text={(baseCourse?.transcript ?? "") + "\n" + transcript}
               live={live}
@@ -782,11 +872,11 @@ export default function RecordPage({ continueId, subjectId: presetSubject }: { c
                   : "Prêt pour l'analyse : notes, fiche, exercices et examen."}
             </p>
             <div className="grid grid-cols-[auto_minmax(0,1fr)] gap-2 sm:flex">
-              <Button variant="outline" onClick={() => save(false)} disabled={!!saving || !!importing || (!transcript.trim() && !rec.elapsed)} data-testid="button-save">
+              <Button variant="outline" onClick={() => save(false)} disabled={!!saving || !!importing || !!docImport || (!transcript.trim() && !rec.elapsed)} data-testid="button-save">
                 {saving === "save" && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
                 Enregistrer
               </Button>
-              <Button onClick={() => save(true)} disabled={!!saving || !!importing || totalWords < 40 || !transcript.trim()} data-testid="button-save-analyze">
+              <Button onClick={() => save(true)} disabled={!!saving || !!importing || !!docImport || totalWords < 40 || !transcript.trim()} data-testid="button-save-analyze">
                 {saving === "analyze" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Sparkles className="mr-2 h-4 w-4" />}
                 <span className="sm:hidden">Analyser</span>
                 <span className="hidden sm:inline">Enregistrer et analyser</span>

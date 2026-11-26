@@ -9,7 +9,7 @@ import { registerSchema, loginSchema, courseInputSchema, coursePatchSchema, subj
 import type { User, Exam, ExamGrade } from "@shared/schema";
 import { transcribeAudio, cleanTranscript, createImport, importChunk, importStatus, importTranscribePart, finishImport, IMPORT_CHUNK, IMPORT_MAX_BYTES } from "./stt";
 import { audioKey, signedUploadUrl, signedDownloadUrl, removeCourseAudio, fetchStored, removeKeys } from "./audioStore";
-import { geminiConfigured, readStatement } from "./gemini";
+import { geminiConfigured, readStatement, readCoursePages } from "./gemini";
 import { buildBlocks, ALL_PARTS, safeFileName, type ExportPart } from "./export/blocks";
 import { renderPdf } from "./export/pdf";
 import { renderDocx } from "./export/docx";
@@ -671,6 +671,25 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     const row = await owned(req, res);
     if (!row) return;
     await redirectAudio(req, res, audioKey(row.id), `cours-${row.id}`);
+  }));
+
+  // ---------- Import d'un document de cours (PDF scanné, photo de polycopié) ----------
+  // Le texte des PDF, Word et PowerPoint est extrait dans le navigateur ; seules les pages sans texte arrivent ici en images.
+  app.post("/api/document/ocr", auth, requireConsent, h(async (req: AuthedRequest, res) => {
+    if (!geminiConfigured()) return res.status(503).json({ message: "Lecture des documents indisponible pour le moment." });
+    const raw = Array.isArray(req.body?.pages) ? req.body.pages : [];
+    const pages = raw
+      .slice(0, 6)
+      .map((p: any) => ({ mime: String(p?.mime || ""), data: String(p?.data || "") }))
+      .filter((p: { mime: string; data: string }) => /^image\/(jpeg|png|webp)$/.test(p.mime) && p.data.length > 100);
+    if (!pages.length) return res.status(400).json({ message: "Aucune page lisible." });
+    try {
+      const text = await readCoursePages(pages, str(req.body?.hint).slice(0, 200), req.user!.id);
+      res.json({ text });
+    } catch (e: any) {
+      logErr(`doc ocr ${e?.status ?? ""} ${e?.message}`);
+      res.status(e?.status === 429 ? 429 : 502).json({ message: "La lecture de ces pages a échoué. Réessaie dans un instant." });
+    }
   }));
 
   // ---------- Import d'un enregistrement audio (fichier du téléphone, dictaphone…) ----------
