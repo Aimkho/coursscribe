@@ -8,13 +8,13 @@ import { storage, toCourse, toSummary } from "./storage";
 import { registerSchema, loginSchema, courseInputSchema, coursePatchSchema, subjectInputSchema } from "@shared/schema";
 import type { User, Exam, ExamGrade } from "@shared/schema";
 import { transcribeAudio, cleanTranscript, createImport, importChunk, importStatus, importTranscribePart, finishImport, IMPORT_CHUNK, IMPORT_MAX_BYTES } from "./stt";
-import { audioKey, signedUploadUrl, signedDownloadUrl, removeCourseAudio } from "./audioStore";
-import { geminiConfigured } from "./gemini";
+import { audioKey, signedUploadUrl, signedDownloadUrl, removeCourseAudio, fetchStored, removeKeys } from "./audioStore";
+import { geminiConfigured, readStatement } from "./gemini";
 import { buildBlocks, ALL_PARTS, safeFileName, type ExportPart } from "./export/blocks";
 import { renderPdf } from "./export/pdf";
 import { renderDocx } from "./export/docx";
 import { renderPptx } from "./export/pptx";
-import { generateNotes, generateSheet, generateExercises, generateExam, gradeOpenAnswers } from "./ai";
+import { generateNotes, generateSheet, generateExercises, generateExam, gradeOpenAnswers, generateClassExercises, classExercisesBrief } from "./ai";
 
 /** Version du texte de consentement : l'incrémenter redemande l'accord à tous les utilisateurs. */
 export const CONSENT_VERSION = 1;
@@ -162,6 +162,32 @@ function normalizeExam(x: any): Exam {
     })),
   } as Exam;
 }
+
+const STATEMENT_SOURCES = ["photo", "transcription", "photo_et_transcription"];
+function normalizeClassExercises(x: any, attIds: Set<number>) {
+  return {
+    items: arr(x.items)
+      .map((e: any, i: number) => ({
+        number: Number(e.number) > 0 ? Math.round(Number(e.number)) : i + 1,
+        title: str(e.title) || `Exercice ${i + 1}`,
+        reference: /^exercice\s*n?°?\s*\d+\.?$/i.test(str(e.reference)) ? "" : str(e.reference),
+        statement: str(e.statement),
+        statement_source: STATEMENT_SOURCES.includes(e.statement_source) ? e.statement_source : "transcription",
+        statement_complete: e.statement_complete !== false,
+        correction: arr(e.correction).map((c: any) => ({ step: str(c.step), detail: str(c.detail) })).filter((c: any) => c.step || c.detail),
+        final_answer: str(e.final_answer),
+        method: arr(e.method).map(str).filter(Boolean),
+        pitfalls: arr(e.pitfalls).map(str).filter(Boolean),
+        missing: str(e.missing),
+        attachment_ids: arr(e.attachment_ids).map(Number).filter((n: number) => attIds.has(n)),
+      }))
+      .map((e: any) => (e.attachment_ids.length && e.statement_source === "transcription" ? { ...e, statement_source: "photo_et_transcription" } : e))
+      .filter((e: any) => e.statement || e.correction.length),
+  };
+}
+
+const ATT_MIMES: Record<string, "image" | "pdf"> = { "image/jpeg": "image", "image/png": "image", "image/webp": "image", "application/pdf": "pdf" };
+const ATT_MAX = 15 * 1024 * 1024;
 
 const running = new Set<string>();
 
@@ -416,6 +442,72 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     await redirectAudio(req, res, audioKey(row.id, Number(req.params.sid)), `cours-${row.id}-seance-${req.params.sid}`);
   }));
 
+  // ---------- Énoncés d'exercices (photos, PDF) ----------
+  app.post("/api/courses/:id/attachments", auth, h(async (req: AuthedRequest, res) => {
+    const row = await owned(req, res);
+    if (!row) return;
+    const mime = String(req.body?.mime || "");
+    const size = Number(req.body?.size) || 0;
+    const kind = ATT_MIMES[mime];
+    if (!kind) return res.status(400).json({ message: "Format non pris en charge : envoie une photo (JPEG, PNG) ou un PDF." });
+    if (size <= 0 || size > ATT_MAX) return res.status(400).json({ message: "Fichier trop lourd (15 Mo maximum)." });
+    const count = (await storage.listAttachments(row.id)).length;
+    if (count >= 40) return res.status(400).json({ message: "40 énoncés maximum par cours." });
+    const exerciseNo = Number(req.body?.exerciseNo) > 0 ? Math.round(Number(req.body.exerciseNo)) : null;
+    const sessionId = Number(req.body?.sessionId) > 0 ? Number(req.body.sessionId) : null;
+    const { id, key } = await storage.createAttachment({ courseId: row.id, sessionId, exerciseNo, kind, mime, size, label: str(req.body?.label).slice(0, 120) });
+    res.json({ id, url: await signedUploadUrl(key) });
+  }));
+
+  // Fichier reçu par le stockage : l'IA lit l'énoncé.
+  app.post("/api/courses/:id/attachments/:aid/done", auth, requireConsent, h(async (req: AuthedRequest, res) => {
+    const row = await owned(req, res);
+    if (!row) return;
+    const att = await storage.getAttachment(row.id, Number(req.params.aid));
+    if (!att) return res.status(404).json({ message: "Énoncé introuvable." });
+    const buf = await fetchStored(att.storageKey, ATT_MAX);
+    if (!buf) return res.status(400).json({ message: "Le fichier n'est pas arrivé. Réessaie l'envoi." });
+    await storage.updateAttachment(row.id, att.id, { uploaded: true });
+    let extracted: string | null = null;
+    try {
+      extracted = await readStatement(buf, att.mime, [row.subject, row.title].filter(Boolean).join(" — "), req.user!.id);
+    } catch (e: any) {
+      logErr(`statement ${e?.status ?? ""} ${e?.message}`);
+    }
+    await storage.updateAttachment(row.id, att.id, { extracted });
+    const fresh = await storage.getAttachment(row.id, att.id);
+    res.json({ ...fresh, storageKey: undefined, sizeBytes: undefined, readError: extracted === null });
+  }));
+
+  app.get("/api/courses/:id/attachments/:aid/file", auth, h(async (req: AuthedRequest, res) => {
+    const row = await viewable(req, res);
+    if (!row) return;
+    const att = await storage.getAttachment(row.id, Number(req.params.aid));
+    if (!att || !att.uploaded) return res.status(404).end();
+    await redirectAudio(req, res, att.storageKey, `enonce-${att.id}`);
+  }));
+
+  app.patch("/api/courses/:id/attachments/:aid", auth, h(async (req: AuthedRequest, res) => {
+    const row = await owned(req, res);
+    if (!row) return;
+    const patch: any = {};
+    if (req.body?.exerciseNo !== undefined) patch.exerciseNo = Number(req.body.exerciseNo) > 0 ? Math.round(Number(req.body.exerciseNo)) : null;
+    if (req.body?.label !== undefined) patch.label = str(req.body.label).slice(0, 120);
+    if (req.body?.extracted !== undefined) patch.extracted = str(req.body.extracted).slice(0, 20000);
+    await storage.updateAttachment(row.id, Number(req.params.aid), patch);
+    res.json({ ok: true });
+  }));
+
+  app.delete("/api/courses/:id/attachments/:aid", auth, h(async (req: AuthedRequest, res) => {
+    const row = await owned(req, res);
+    if (!row) return;
+    const att = await storage.getAttachment(row.id, Number(req.params.aid));
+    if (!att) return res.json({ ok: true });
+    await storage.deleteAttachment(row.id, att.id);
+    await removeKeys([att.storageKey]);
+    res.json({ ok: true });
+  }));
+
   // ---------- Exports PDF / Word / PowerPoint ----------
   app.get("/api/courses/:id/export/:format", auth, async (req: AuthedRequest, res) => {
     const row = await viewable(req, res);
@@ -533,11 +625,12 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   // ---------- Génération IA ----------
   app.post("/api/courses/:id/generate/:kind", auth, requireConsent, h(async (req: AuthedRequest, res) => {
     const kind = String(req.params.kind);
-    if (!["notes", "sheet", "exercises", "exam"].includes(kind)) return res.status(400).json({ message: "Type inconnu." });
+    if (!["notes", "sheet", "exercises", "exam", "class"].includes(kind)) return res.status(400).json({ message: "Type inconnu." });
     const row = await storage.getCourse(Number(req.params.id));
     if (!row || row.ownerId !== req.user!.id) return res.status(404).json({ message: "Cours introuvable." });
     const words = row.transcript.trim().split(/\s+/).filter(Boolean).length;
-    if (words < 40)
+    const atts = kind === "class" ? (await storage.listAttachments(row.id)).filter((a) => a.extracted) : [];
+    if (words < 40 && !atts.length)
       return res.status(400).json({ message: `La transcription est trop courte (${words} mots). Il faut au moins 40 mots pour une analyse fiable.` });
     const key = `${row.id}:${kind}`;
     if (running.has(key)) return res.status(409).json({ message: "Une génération est déjà en cours pour ce contenu." });
@@ -547,14 +640,23 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       const started = Date.now();
       let notes = row.notes ?? null;
       const patch: any = {};
-      if (kind === "notes" || !notes) {
+      if (kind === "class") {
+        const raw = await generateClassExercises(
+          meta,
+          row.transcript,
+          atts.map((a) => ({ id: a.id, exerciseNo: a.exerciseNo, label: a.label, text: a.extracted! })),
+          req.user!.id,
+        );
+        patch.classExercises = normalizeClassExercises(raw, new Set(atts.map((a) => a.id)));
+      } else if (kind === "notes" || !notes) {
         notes = normalizeNotes(await generateNotes(meta, row.transcript, req.user!.id));
         patch.notes = notes;
         patch.analyzedAt = started;
       }
       if (kind === "sheet") patch.sheet = normalizeSheet(await generateSheet(meta, row.transcript, notes, req.user!.id));
-      if (kind === "exercises") patch.exercises = normalizeExercises(await generateExercises(meta, row.transcript, notes, req.user!.id));
-      if (kind === "exam") patch.exam = normalizeExam(await generateExam(meta, row.transcript, notes, req.user!.id));
+      const brief = classExercisesBrief(row.classExercises);
+      if (kind === "exercises") patch.exercises = normalizeExercises(await generateExercises(meta, row.transcript, notes, req.user!.id, brief));
+      if (kind === "exam") patch.exam = normalizeExam(await generateExam(meta, row.transcript, notes, req.user!.id, brief));
       const updated = (await storage.updateCourse(row.id, req.user!.id, patch))!;
       res.json(await toCourse(updated, req.user!.id));
     } catch (e: any) {

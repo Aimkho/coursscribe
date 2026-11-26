@@ -24,6 +24,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { ExerciseRecordPanel } from "@/components/ClassExercises";
 import { useRecorder, formatDuration } from "@/lib/useRecorder";
 import { apiRequest, apiUploadSessionAudio, apiTranscribe, apiTranscribeFile, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
@@ -139,7 +140,7 @@ export default function RecordPage({ continueId, subjectId: presetSubject }: { c
     transcribe: apiTranscribe,
     getContext: () => {
       const m = metaRef.current;
-      return [m.subject, m.title, m.transcript.slice(-150)].filter(Boolean).join(" — ");
+      return [m.subject, m.title, m.transcript.replace(/\[Exercice \d+ — (?:début|fin)\]/g, " ").slice(-150).trim()].filter(Boolean).join(" — ");
     },
     onFinal: (t) =>
       setTranscript((prev) => {
@@ -147,6 +148,7 @@ export default function RecordPage({ continueId, subjectId: presetSubject }: { c
         const sentence = t.charAt(0).toUpperCase() + t.slice(1);
         return prev + sep + sentence + (/[.!?]$/.test(sentence) ? "" : ".");
       }),
+    onMarker: (m) => setTranscript((p) => (p.trim() ? p.trimEnd() + "\n\n" : "") + m + "\n"),
   });
 
   useEffect(() => {
@@ -652,6 +654,19 @@ export default function RecordPage({ continueId, subjectId: presetSubject }: { c
                 </label>
               )}
             </div>
+
+            <ExerciseRecordPanel
+              text={(baseCourse?.transcript ?? "") + "\n" + transcript}
+              live={live}
+              onMarker={(m) => {
+                if (recording) rec.insertMarker(m);
+                else setTranscript((p) => (p.trim() ? p.trimEnd() + "\n\n" : "") + m + "\n");
+              }}
+              ensureCourse={async () => {
+                await ensureServerObjects();
+                return { courseId: courseIdRef.current!, sessionId: sessionRef.current?.id ?? null };
+              }}
+            />
 
             <div className="mt-5 border-t border-border pt-4">
               <div className="flex items-center justify-between">

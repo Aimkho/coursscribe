@@ -25,6 +25,7 @@ import {
   Trash2,
   User2,
   Wand2,
+  PenLine,
 } from "lucide-react";
 import type { Course } from "@shared/schema";
 import { Button } from "@/components/ui/button";
@@ -46,14 +47,17 @@ import { cn } from "@/lib/utils";
 import { formatDuration } from "@/lib/useRecorder";
 import { formatDate, StatusBadge } from "@/components/CourseCard";
 import { NotesView, SheetView, ExercisesView, ExamView } from "@/components/StudyViews";
+import { ClassExercisesView } from "@/components/ClassExercises";
 import { autoAnalyze } from "./RecordPage";
 
-type Kind = "notes" | "sheet" | "exercises" | "exam";
+type Kind = "notes" | "class" | "sheet" | "exercises" | "exam";
+const contentOf = (c: Course, k: Kind) => (k === "class" ? c.classExercises : c[k]);
 type Tab = Kind | "transcript";
 
 const TABS: { id: Tab; label: string; icon: any }[] = [
   { id: "notes", label: "Notes", icon: NotebookPen },
   { id: "sheet", label: "Fiche de révision", icon: Brain },
+  { id: "class", label: "En classe", icon: PenLine },
   { id: "exercises", label: "Exercices", icon: ClipboardList },
   { id: "exam", label: "Examen blanc", icon: GraduationCap },
   { id: "transcript", label: "Transcription", icon: FileText },
@@ -64,6 +68,11 @@ const GEN_INFO: Record<Kind, { title: string; text: string; cta: string }> = {
     title: "Analyse du cours",
     text: "L'IA extrait l'essentiel : idée centrale, plan, définitions, formules, exemples et réponses utiles aux questions d'élèves. Les hésitations et digressions sont écartées.",
     cta: "Analyser le cours",
+  },
+  class: {
+    title: "Exercices faits en classe",
+    text: "Chaque exercice traité en cours, avec son énoncé et la correction du prof remise au propre.",
+    cta: "Retrouver les exercices",
   },
   sheet: {
     title: "Fiche de révision approfondie",
@@ -120,7 +129,8 @@ export default function CoursePage({ id, publicView }: { id: number; publicView?
     if (!course?.notes) await generate("notes");
     const latest = queryClient.getQueryData<Course>(["/api/courses", id]);
     if (!latest?.notes) return;
-    await Promise.all((["sheet", "exercises", "exam"] as Kind[]).filter((k) => !latest[k]).map((k) => generate(k)));
+    if (!latest.classExercises) await generate("class");
+    await Promise.all((["sheet", "exercises", "exam"] as Kind[]).filter((k) => !latest[k as "sheet"]).map((k) => generate(k)));
   }
 
   useEffect(() => {
@@ -135,6 +145,7 @@ export default function CoursePage({ id, publicView }: { id: number; publicView?
     await generate("notes");
     const latest = queryClient.getQueryData<Course>(["/api/courses", id]);
     if (!latest?.notes || latest.analysisStale) return;
+    await generate("class");
     await Promise.all((["sheet", "exercises", "exam"] as Kind[]).map((k) => generate(k)));
   }
 
@@ -203,7 +214,7 @@ export default function CoursePage({ id, publicView }: { id: number; publicView?
 
   const words = course.transcript.trim() ? course.transcript.trim().split(/\s+/).length : 0;
   const anyPending = pending.size > 0;
-  const missing = (["notes", "sheet", "exercises", "exam"] as Kind[]).filter((k) => !course[k]);
+  const missing = (["notes", "class", "sheet", "exercises", "exam"] as Kind[]).filter((k) => !contentOf(course, k));
 
   function renderTab() {
     if (!course) return null;
@@ -238,7 +249,17 @@ export default function CoursePage({ id, publicView }: { id: number; publicView?
       );
 
     const kind = tab as Kind;
-    const content = course[kind];
+    if (kind === "class")
+      return (
+        <ClassExercisesView
+          course={course}
+          owner={owner}
+          pending={pending.has("class") || (pending.has("notes") && !course.notes)}
+          error={genError.class}
+          onGenerate={() => generate("class")}
+        />
+      );
+    const content = contentOf(course, kind);
     const isPending = pending.has(kind) || (kind !== "notes" && pending.has("notes") && !course.notes);
     if (isPending)
       return (
@@ -467,7 +488,7 @@ export default function CoursePage({ id, publicView }: { id: number; publicView?
       <div className="no-print -mx-4 mb-6 overflow-x-auto px-4 sm:mx-0 sm:px-0">
         <div className="flex w-max min-w-full gap-1 border-b border-border">
           {TABS.map((t) => {
-            const ready = t.id === "transcript" || !!course[t.id as Kind];
+            const ready = t.id === "transcript" || !!contentOf(course, t.id as Kind);
             const busy = t.id !== "transcript" && pending.has(t.id as Kind);
             return (
               <button

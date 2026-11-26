@@ -1,4 +1,4 @@
-import type { User, CourseRow, Course, CourseSummary, CourseSession, Subject } from "@shared/schema";
+import type { User, CourseRow, Course, CourseSummary, CourseSession, Subject, Attachment } from "@shared/schema";
 import { q, one, pool } from "./db";
 
 const COURSE_COLS = `
@@ -6,7 +6,7 @@ const COURSE_COLS = `
   c.title, coalesce(s.name, c.subject) as subject, c.level, c.transcript, c.duration_sec as "durationSec",
   c.is_public as "isPublic", c.has_audio as "hasAudio", c.status, c.created_at as "createdAt", c.updated_at as "updatedAt",
   c.transcript_updated_at as "transcriptUpdatedAt", c.analyzed_at as "analyzedAt",
-  c.notes, c.sheet, c.exercises, c.exam`;
+  c.notes, c.sheet, c.exercises, c.exam, c.class_exercises as "classExercises"`;
 const COURSE_FROM = `from public.courses c
   join public.users u on u.id = c.owner_id
   left join public.subjects s on s.id = c.subject_id`;
@@ -39,7 +39,7 @@ function base(row: CourseRow, viewerId: number) {
 }
 
 export async function toCourse(row: CourseRow, viewerId: number): Promise<Course> {
-  const [sessions, siblings] = await Promise.all([
+  const [sessions, siblings, attachments] = await Promise.all([
     storage.listCourseSessions(row.id),
     row.subjectId
       ? q(
@@ -48,6 +48,7 @@ export async function toCourse(row: CourseRow, viewerId: number): Promise<Course
           [row.subjectId, viewerId],
         )
       : Promise.resolve([]),
+    storage.listAttachments(row.id),
   ]);
   return {
     ...base(row, viewerId),
@@ -58,6 +59,8 @@ export async function toCourse(row: CourseRow, viewerId: number): Promise<Course
     sheet: row.sheet ?? null,
     exercises: row.exercises ?? null,
     exam: row.exam ?? null,
+    classExercises: row.classExercises ?? null,
+    attachments,
   };
 }
 
@@ -90,12 +93,52 @@ const PATCH_COLS: Record<string, string> = {
   sheet: "sheet",
   exercises: "exercises",
   exam: "exam",
+  classExercises: "class_exercises",
   analyzedAt: "analyzed_at",
   transcriptUpdatedAt: "transcript_updated_at",
 };
-const JSON_COLS = new Set(["notes", "sheet", "exercises", "exam"]);
+const JSON_COLS = new Set(["notes", "sheet", "exercises", "exam", "classExercises"]);
+
+const ATT_COLS = `id, exercise_no as "exerciseNo", kind, mime, label, extracted, uploaded, created_at as "createdAt"`;
 
 export const storage = {
+  // ----- Énoncés joints (photos, PDF) -----
+  async listAttachments(courseId: number): Promise<Attachment[]> {
+    return q(`select ${ATT_COLS} from public.course_attachments where course_id = $1 and uploaded order by exercise_no nulls last, created_at`, [courseId]);
+  },
+  async getAttachment(courseId: number, id: number): Promise<(Attachment & { storageKey: string; sizeBytes: number }) | undefined> {
+    return one(
+      `select ${ATT_COLS}, storage_key as "storageKey", size_bytes as "sizeBytes" from public.course_attachments where course_id = $1 and id = $2`,
+      [courseId, id],
+    );
+  },
+  async createAttachment(d: { courseId: number; sessionId: number | null; exerciseNo: number | null; kind: string; mime: string; size: number; label: string }) {
+    const r = (await one<{ id: number }>(
+      `insert into public.course_attachments (course_id, session_id, exercise_no, kind, mime, size_bytes, label, created_at)
+       values ($1, $2, $3, $4, $5, $6, $7, $8) returning id`,
+      [d.courseId, d.sessionId, d.exerciseNo, d.kind, d.mime, d.size, d.label, Date.now()],
+    ))!;
+    const key = `${d.courseId}/a${r.id}`;
+    await q(`update public.course_attachments set storage_key = $2 where id = $1`, [r.id, key]);
+    return { id: r.id, key };
+  },
+  async updateAttachment(courseId: number, id: number, patch: { uploaded?: boolean; extracted?: string | null; exerciseNo?: number | null; label?: string }) {
+    const sets: string[] = [];
+    const vals: any[] = [courseId, id];
+    const map: Record<string, string> = { uploaded: "uploaded", extracted: "extracted", exerciseNo: "exercise_no", label: "label" };
+    for (const [k, col] of Object.entries(map)) {
+      if ((patch as any)[k] !== undefined) {
+        vals.push((patch as any)[k]);
+        sets.push(`${col} = $${vals.length}`);
+      }
+    }
+    if (!sets.length) return;
+    await q(`update public.course_attachments set ${sets.join(", ")} where course_id = $1 and id = $2`, vals);
+  },
+  async deleteAttachment(courseId: number, id: number) {
+    await q(`delete from public.course_attachments where course_id = $1 and id = $2`, [courseId, id]);
+  },
+
   async getUserByEmail(email: string): Promise<User | undefined> {
     return one(`select id, email, name, password_hash as "passwordHash", ai_consent_at as "aiConsentAt", ai_consent_version as "aiConsentVersion" from public.users where email = $1`, [email]);
   },

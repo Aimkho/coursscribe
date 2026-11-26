@@ -33,6 +33,8 @@ export function useRecorder(
   opts: {
     lang?: string;
     onFinal?: (text: string) => void;
+    /** Repère inséré dans le texte (ex. « [Exercice 2 — début] »), à sa place chronologique. */
+    onMarker?: (text: string) => void;
     transcribe?: (blob: Blob, context: string) => Promise<string>;
     getContext?: () => string;
   } = {},
@@ -69,6 +71,8 @@ export function useRecorder(
   const thresholdRef = useRef(0.02);
   const onFinalRef = useRef(opts.onFinal);
   onFinalRef.current = opts.onFinal;
+  const onMarkerRef = useRef(opts.onMarker);
+  onMarkerRef.current = opts.onMarker;
   const transcribeRef = useRef(opts.transcribe);
   transcribeRef.current = opts.transcribe;
   const getContextRef = useRef(opts.getContext);
@@ -87,7 +91,7 @@ export function useRecorder(
   const lastFrameRef = useRef(0);
   const seqRef = useRef(0);
   const nextCommitRef = useRef(0);
-  const resultsRef = useRef(new Map<number, string | null>());
+  const resultsRef = useRef(new Map<number, string | null | { marker: string }>());
   const previewsRef = useRef(new Map<number, string>());
   const curPreviewRef = useRef(""); // phrases finales du navigateur depuis la dernière coupe
   const mimeRef = useRef("");
@@ -215,7 +219,8 @@ export function useRecorder(
       const t = m.get(seq);
       m.delete(seq);
       previewsRef.current.delete(seq);
-      if (t) onFinalRef.current?.(t);
+      if (t && typeof t === "object") onMarkerRef.current?.(t.marker);
+      else if (t) onFinalRef.current?.(t);
       nextCommitRef.current++;
     }
     setPendingCount(seqRef.current - nextCommitRef.current);
@@ -291,6 +296,20 @@ export function useRecorder(
       if (restart) startSegment();
     },
     [startSegment],
+  );
+
+  /**
+   * Insère un repère dans le texte. Pendant l'enregistrement, l'extrait en cours est coupé à cet instant :
+   * ce qui a été dit avant le clic reste avant le repère, même si sa transcription arrive après.
+   */
+  const insertMarker = useCallback(
+    (text: string) => {
+      if (stateRef.current === "recording" && segRecRef.current) cutSegment(true);
+      const seq = seqRef.current++;
+      resultsRef.current.set(seq, { marker: text });
+      commitInOrder();
+    },
+    [cutSegment, commitInOrder],
   );
 
   /** Attend que tous les extraits envoyés soient transcrits (max 40 s). */
@@ -554,6 +573,7 @@ export function useRecorder(
     pendingPreview,
     preview,
     waitForPending,
+    insertMarker,
     setThreshold: (v: number) => (thresholdRef.current = v),
     start,
     pause: () => pause("manual"),

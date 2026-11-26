@@ -53,3 +53,21 @@ export async function removeCourseAudio(courseId: number) {
     console.error("audio remove", courseId, e?.message);
   }
 }
+
+/** Lecture d'un fichier stocké (énoncé photographié) pour l'envoyer à l'IA. */
+export async function fetchStored(key: string, maxBytes: number): Promise<Buffer | null> {
+  const url = await signedDownloadUrl(key, 600);
+  if (!url) return null;
+  const res = await fetch(url);
+  if (!res.ok) return null;
+  const buf = Buffer.from(await res.arrayBuffer());
+  return buf.length > maxBytes ? null : buf;
+}
+
+export async function removeKeys(paths: string[]) {
+  try {
+    await gateway({ op: "remove", paths });
+  } catch (e: any) {
+    console.error("storage remove", paths.join(","), e?.message);
+  }
+}

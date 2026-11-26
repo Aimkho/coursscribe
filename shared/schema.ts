@@ -25,6 +25,7 @@ export type CourseRow = {
   sheet: any;
   exercises: any;
   exam: any;
+  classExercises: any;
 };
 export type CourseSession = { id: number; idx: number; startedAt: number; durationSec: number; wordCount: number; hasAudio: boolean };
 export type Subject = { id: number; name: string; level: string; createdAt: number; chapterCount: number; lastActivity: number | null };
@@ -120,6 +121,36 @@ export type ExamGrade = {
   priorities: string[];
 };
 
+// ---------- Exercices faits en classe ----------
+/** Photo ou PDF d'énoncé joint à un cours (tableau, polycopié, page du manuel). */
+export type Attachment = {
+  id: number;
+  exerciseNo: number | null;
+  kind: "image" | "pdf";
+  mime: string;
+  label: string;
+  extracted: string | null;
+  uploaded: boolean;
+  createdAt: number;
+};
+export type ClassExercise = {
+  number: number;
+  title: string;
+  /** Référence citée par le prof (« exercice 3 page 45 »), vide si aucune. */
+  reference: string;
+  statement: string;
+  statement_source: "photo" | "transcription" | "photo_et_transcription";
+  /** Faux si l'énoncé n'a pas pu être reconstitué en entier (photo conseillée). */
+  statement_complete: boolean;
+  correction: { step: string; detail: string }[];
+  final_answer: string;
+  method: string[];
+  pitfalls: string[];
+  missing: string;
+  attachment_ids: number[];
+};
+export type ClassExercises = { items: ClassExercise[] };
+
 export type Course = {
   id: number;
   ownerId: number;
@@ -146,8 +177,10 @@ export type Course = {
   sheet: Sheet | null;
   exercises: Exercises | null;
   exam: Exam | null;
+  classExercises: ClassExercises | null;
+  attachments: Attachment[];
 };
-export type CourseSummary = Omit<Course, "transcript" | "notes" | "sheet" | "exercises" | "exam" | "sessions" | "siblings"> & {
+export type CourseSummary = Omit<Course, "transcript" | "notes" | "sheet" | "exercises" | "exam" | "sessions" | "siblings" | "classExercises" | "attachments"> & {
   summary: string;
   wordCount: number;
   hasNotes: boolean;

@@ -16,8 +16,8 @@ export type Block =
   | { t: "question"; n: number; meta: string; text: string; options?: string[] }
   | { t: "answer"; n: number; text: string; explanation?: string };
 
-export type ExportPart = "notes" | "sheet" | "exercises" | "exam";
-export const ALL_PARTS: ExportPart[] = ["notes", "sheet", "exercises", "exam"];
+export type ExportPart = "notes" | "sheet" | "class" | "exercises" | "exam";
+export const ALL_PARTS: ExportPart[] = ["notes", "sheet", "class", "exercises", "exam"];
 
 const LETTERS = "ABCDEFGH";
 const DIFF: Record<string, string> = { facile: "Facile", moyen: "Moyen", difficile: "Difficile" };
@@ -33,11 +33,13 @@ export function courseMeta(c: Course) {
 
 export function buildBlocks(c: Course, parts: ExportPart[], withAnswers = true): Block[] {
   const out: Block[] = [];
+  let partNo = 0;
+  const kicker = () => `Partie ${++partNo}`;
   const n = c.notes;
   const s = c.sheet;
 
   if (parts.includes("notes") && n) {
-    out.push({ t: "part", kicker: "Partie 1", text: "Notes de cours" });
+    out.push({ t: "part", kicker: kicker(), text: "Notes de cours" });
     if (clean(n.central_idea)) out.push({ t: "callout", label: "Idée centrale", text: n.central_idea, tone: "dark" });
     if (list(n.keywords).length) out.push({ t: "tags", items: list(n.keywords) });
     if (clean(n.summary)) {
@@ -74,7 +76,7 @@ export function buildBlocks(c: Course, parts: ExportPart[], withAnswers = true):
   }
 
   if (parts.includes("sheet") && s) {
-    out.push({ t: "part", kicker: "Partie 2", text: "Fiche de révision" });
+    out.push({ t: "part", kicker: kicker(), text: "Fiche de révision" });
     if (list(s.essentials).length) {
       out.push({ t: "h2", text: "L'essentiel à savoir" });
       out.push({ t: "numbered", items: list(s.essentials) });
@@ -100,9 +102,31 @@ export function buildBlocks(c: Course, parts: ExportPart[], withAnswers = true):
     }
   }
 
+  if (parts.includes("class") && c.classExercises?.items?.length) {
+    out.push({ t: "part", kicker: kicker(), text: "Exercices faits en classe" });
+    c.classExercises.items.forEach((e) => {
+      out.push({ t: "h2", text: `Exercice ${e.number} — ${clean(e.title)}` });
+      if (clean(e.reference)) out.push({ t: "p", text: clean(e.reference), muted: true });
+      if (clean(e.statement)) out.push({ t: "callout", label: "Énoncé", text: clean(e.statement), tone: "violet" });
+      if (!e.statement_complete) out.push({ t: "p", text: "Énoncé incomplet : ajoute la photo de l'énoncé pour le compléter.", muted: true });
+      if (withAnswers) {
+        if (e.correction?.length) {
+          out.push({ t: "h3", text: "Correction donnée en cours" });
+          e.correction.forEach((st) => out.push({ t: "def", term: clean(st.step), text: clean(st.detail) }));
+        }
+        if (clean(e.final_answer)) out.push({ t: "callout", label: "Résultat", text: clean(e.final_answer), tone: "dark" });
+      }
+      if (list(e.method).length) {
+        out.push({ t: "h3", text: "Méthode à retenir" });
+        out.push({ t: "numbered", items: list(e.method) });
+      }
+      if (list(e.pitfalls).length) out.push({ t: "callout", label: "Pièges vus en classe", text: list(e.pitfalls).join("\n"), tone: "rose" });
+    });
+  }
+
   if (parts.includes("exercises") && c.exercises?.items?.length) {
     const items = c.exercises.items;
-    out.push({ t: "part", kicker: "Partie 3", text: "Exercices" });
+    out.push({ t: "part", kicker: kicker(), text: "Exercices" });
     items.forEach((e, i) => {
       const opts =
         e.type === "qcm" ? list(e.options) : e.type === "vrai_faux" ? ["Vrai", "Faux"] : undefined;
@@ -129,7 +153,7 @@ export function buildBlocks(c: Course, parts: ExportPart[], withAnswers = true):
   if (parts.includes("exam") && c.exam?.sections?.length) {
     const ex = c.exam;
     const total = ex.sections.flatMap((x) => x.questions).reduce((a, q) => a + (Number(q.points) || 0), 0);
-    out.push({ t: "part", kicker: "Partie 4", text: clean(ex.title) || "Examen blanc" });
+    out.push({ t: "part", kicker: kicker(), text: clean(ex.title) || "Examen blanc" });
     out.push({ t: "callout", label: `Durée : ${ex.duration_minutes || 60} min · Noté sur ${total || 20}`, text: clean(ex.instructions) || "Réponds à toutes les questions.", tone: "violet" });
     let k = 0;
     ex.sections.forEach((sec) => {

@@ -260,3 +260,50 @@ export const queryClient = new QueryClient({
     mutations: { retry: false },
   },
 });
+
+// ---------- Énoncés d'exercices (photos, PDF) ----------
+export function attachmentUrl(courseId: number, attId: number) {
+  return `${API_BASE}/api/courses/${courseId}/attachments/${attId}/file?token=${authToken ?? ""}`;
+}
+
+/** Réduit une photo à 2000 px de côté en JPEG : lisible par l'IA, rapide à envoyer en 4G. */
+async function compressImage(file: File): Promise<Blob> {
+  if (file.type === "application/pdf") return file;
+  try {
+    const bmp = await createImageBitmap(file);
+    const scale = Math.min(1, 2000 / Math.max(bmp.width, bmp.height));
+    const w = Math.round(bmp.width * scale);
+    const h = Math.round(bmp.height * scale);
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    canvas.getContext("2d")!.drawImage(bmp, 0, 0, w, h);
+    const blob = await new Promise<Blob | null>((r) => canvas.toBlob(r, "image/jpeg", 0.85));
+    return blob && blob.size < file.size * 1.2 ? blob : file;
+  } catch {
+    return file;
+  }
+}
+
+/** Envoie un énoncé dans le stockage puis demande à l'IA de le lire. */
+export async function apiUploadAttachment(
+  courseId: number,
+  file: File,
+  opts: { exerciseNo?: number | null; sessionId?: number | null; label?: string } = {},
+) {
+  const blob = await compressImage(file);
+  let mime = (blob.type || file.type || "").split(";")[0];
+  if (!["image/jpeg", "image/png", "image/webp", "application/pdf"].includes(mime)) mime = "image/jpeg";
+  const r = await apiRequest("POST", `/api/courses/${courseId}/attachments`, {
+    mime,
+    size: blob.size,
+    exerciseNo: opts.exerciseNo ?? null,
+    sessionId: opts.sessionId ?? null,
+    label: opts.label ?? "",
+  });
+  const { id, url } = await r.json();
+  const put = await fetch(url, { method: "PUT", headers: { "Content-Type": mime, "x-upsert": "true" }, body: blob });
+  if (!put.ok) throw new Error(`Envoi de la photo impossible (${put.status}).`);
+  const done = await apiRequest("POST", `/api/courses/${courseId}/attachments/${id}/done`);
+  return (await done.json()) as import("@shared/schema").Attachment & { readError?: boolean };
+}

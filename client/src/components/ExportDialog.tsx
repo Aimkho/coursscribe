@@ -9,7 +9,7 @@ import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 
 type Format = "pdf" | "docx" | "pptx";
-type Part = "notes" | "sheet" | "exercises" | "exam";
+type Part = "notes" | "sheet" | "class" | "exercises" | "exam";
 
 const FORMATS: { id: Format; label: string; hint: string; icon: typeof FileText; ext: string }[] = [
   { id: "pdf", label: "PDF", hint: "Mise en page soignée, prête à imprimer", icon: FileText, ext: "pdf" },
@@ -20,6 +20,7 @@ const FORMATS: { id: Format; label: string; hint: string; icon: typeof FileText;
 const PARTS: { id: Part; label: string }[] = [
   { id: "notes", label: "Notes de cours" },
   { id: "sheet", label: "Fiche de révision" },
+  { id: "class", label: "Exercices faits en classe" },
   { id: "exercises", label: "Exercices" },
   { id: "exam", label: "Examen blanc" },
 ];
@@ -31,6 +32,7 @@ export function ExportDialog({ course }: { course: Course }) {
   const available: Record<Part, boolean> = {
     notes: !!course.notes,
     sheet: !!course.sheet,
+    class: !!course.classExercises?.items?.length,
     exercises: !!course.exercises?.items?.length,
     exam: !!course.exam?.sections?.length,
   };
