@@ -9,6 +9,10 @@ import {
   Paragraph,
   ShadingType,
   TextRun,
+  Table,
+  TableRow,
+  TableCell,
+  WidthType,
 } from "docx";
 import type { Course } from "@shared/schema";
 import { type Block, courseMeta, letter } from "./blocks";
@@ -24,7 +28,7 @@ const lines = (text: string, o: Parameters<typeof run>[1] = {}) =>
   text.split("\n").map((l, i) => new TextRun({ text: l, font: FONT, bold: o?.bold, italics: o?.italics, color: o?.color ?? C.text, size: o?.size ?? 22, break: i ? 1 : 0 }));
 
 export async function renderDocx(c: Course, blocks: Block[]): Promise<Buffer> {
-  const children: Paragraph[] = [];
+  const children: (Paragraph | Table)[] = [];
 
   // En-tête du document
   children.push(
@@ -167,7 +171,7 @@ export async function renderDocx(c: Course, blocks: Block[]): Promise<Buffer> {
             keepNext: true,
             children: [run(`${String(b.n).padStart(2, "0")}   `, { bold: true, color: C.lilac, size: 22 }), run(b.meta.toUpperCase(), { bold: true, color: C.muted, size: 16 })],
           }),
-          new Paragraph({ spacing: { after: 80, line: 290 }, keepNext: !!b.options?.length, indent: { left: 500 }, children: [run(b.text, { bold: true, color: C.ink })] }),
+          new Paragraph({ spacing: { after: 80, line: 290 }, keepNext: !!b.options?.length, indent: { left: 500 }, children: lines(b.text, { bold: true, color: C.ink }) }),
           ...(b.options || []).map(
             (o, i, arr) =>
               new Paragraph({
@@ -179,14 +183,54 @@ export async function renderDocx(c: Course, blocks: Block[]): Promise<Buffer> {
           ),
         );
         break;
+      case "table": {
+        const cols = Math.max(b.headers.length, ...b.rows.map((r) => r.length), 1);
+        const TOTAL = 9000;
+        const first = cols === 1 ? TOTAL : Math.round(Math.min(TOTAL * 0.42, (TOTAL / cols) * 1.6));
+        const other = cols === 1 ? 0 : Math.round((TOTAL - first) / (cols - 1));
+        const widths = Array.from({ length: cols }, (_, i) => (i === 0 ? first : other));
+        const cell = (v: string, i: number, o: { head?: boolean; bold?: boolean; fill?: string }) =>
+          new TableCell({
+            width: { size: widths[i], type: WidthType.DXA },
+            shading: o.fill ? { type: ShadingType.CLEAR, color: "auto", fill: o.fill } : undefined,
+            margins: { top: 60, bottom: 60, left: 100, right: 100 },
+            children: [new Paragraph({ alignment: i > 0 && /\d/.test(v) ? AlignmentType.RIGHT : AlignmentType.LEFT, children: [run(v, { bold: o.head || o.bold, color: o.head ? "FFFFFF" : C.text, size: 19 })] })],
+          });
+        if (b.title) children.push(new Paragraph({ spacing: { before: 120, after: 60 }, keepNext: true, children: [run(b.title.toUpperCase(), { bold: true, color: C.violet, size: 17 })] }));
+        const rows: TableRow[] = [];
+        if (b.headers.length)
+          rows.push(new TableRow({ tableHeader: true, children: widths.map((_, i) => cell(b.headers[i] || "", i, { head: true, fill: b.tone === "dark" ? C.ink : C.violet })) }));
+        b.rows.forEach((r, ri) => {
+          const bold = /^(total|résultat|marge|ebe|caf|ca\b|solde)/i.test(r[0] || "");
+          rows.push(new TableRow({ children: widths.map((_, i) => cell(r[i] || "", i, { bold, fill: bold ? C.soft : ri % 2 ? "FAF8FF" : undefined })) }));
+        });
+        children.push(
+          new Table({
+            width: { size: TOTAL, type: WidthType.DXA },
+            columnWidths: widths,
+            indent: { size: 500, type: WidthType.DXA },
+            borders: {
+              top: { style: BorderStyle.SINGLE, size: 4, color: "E6E1F5" },
+              bottom: { style: BorderStyle.SINGLE, size: 4, color: "E6E1F5" },
+              left: { style: BorderStyle.NONE, size: 0, color: "FFFFFF" },
+              right: { style: BorderStyle.NONE, size: 0, color: "FFFFFF" },
+              insideHorizontal: { style: BorderStyle.SINGLE, size: 4, color: "E6E1F5" },
+              insideVertical: { style: BorderStyle.NONE, size: 0, color: "FFFFFF" },
+            },
+            rows,
+          }),
+          new Paragraph({ spacing: { after: 120 }, children: [] }),
+        );
+        break;
+      }
       case "answer":
         children.push(
           new Paragraph({
             spacing: { before: 100, after: b.explanation ? 20 : 120, line: 280 },
             indent: { left: 500, hanging: 500 },
-            children: [run(`${String(b.n).padStart(2, "0")}   `, { bold: true, color: C.rose }), run(b.text, { bold: b.text.length <= 140, color: C.ink })],
+            children: [run(`${String(b.n).padStart(2, "0")}   `, { bold: true, color: C.rose }), ...lines(b.text, { bold: b.text.length <= 140, color: C.ink })],
           }),
-          ...(b.explanation ? [new Paragraph({ spacing: { after: 120, line: 280 }, indent: { left: 500 }, children: [run(b.explanation, { color: C.muted, size: 20 })] })] : []),
+          ...(b.explanation ? [new Paragraph({ spacing: { after: 120, line: 280 }, indent: { left: 500 }, children: lines(b.explanation, { color: C.muted, size: 20 }) })] : []),
         );
         break;
     }

@@ -14,6 +14,7 @@ import CoursePage from "@/pages/CoursePage";
 import SubjectPage from "@/pages/SubjectPage";
 import ConsentPage from "@/pages/ConsentPage";
 import PrivacyPage from "@/pages/PrivacyPage";
+import BillingPage, { QuotaDialog } from "@/pages/BillingPage";
 
 function AppRouter() {
   const { user, ready } = useAuth();
@@ -25,6 +26,7 @@ function AppRouter() {
   if (!user.aiConsent) return <ConsentPage />;
   return (
     <AppShell>
+      <QuotaDialog />
       <Switch>
         <Route path="/" component={DashboardPage} />
         <Route path="/record">{() => <RecordPage key="new" />}</Route>
@@ -33,6 +35,7 @@ function AppRouter() {
         <Route path="/subject/:id">{(p) => <SubjectPage key={p.id} id={Number(p.id)} />}</Route>
         <Route path="/library" component={LibraryPage} />
         <Route path="/privacy" component={PrivacyPage} />
+        <Route path="/abonnement" component={BillingPage} />
         <Route path="/course/:id">{(p) => <CoursePage key={p.id} id={Number(p.id)} />}</Route>
         <Route path="/public/:id">{(p) => <CoursePage key={`p${p.id}`} id={Number(p.id)} publicView />}</Route>
         <Route component={NotFound} />

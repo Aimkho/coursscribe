@@ -86,8 +86,10 @@ export type Sheet = {
   flashcards: { front: string; back: string }[];
   checklist: string[];
 };
+/** Tableau de données (bilan, compte de résultat, relevé de mesures, tableau de variations…). */
+export type DataTable = { title: string; headers: string[]; rows: string[][] };
 export type Exercise = {
-  type: "qcm" | "vrai_faux" | "ouverte" | "application";
+  type: "qcm" | "vrai_faux" | "ouverte" | "application" | "cas_pratique";
   difficulty: "facile" | "moyen" | "difficile";
   question: string;
   options?: string[];
@@ -95,19 +97,26 @@ export type Exercise = {
   answer_bool?: boolean;
   model_answer: string;
   explanation: string;
+  /** Données de l'énoncé présentées en tableau. */
+  tables?: DataTable[];
+  /** Tableaux du corrigé (tableau complété, calculs détaillés). */
+  answer_tables?: DataTable[];
 };
-export type Exercises = { items: Exercise[] };
+export type Exercises = { discipline?: string; items: Exercise[] };
 export type ExamQuestion = {
   id: string;
-  type: "qcm" | "ouverte";
+  type: "qcm" | "ouverte" | "cas_pratique";
   question: string;
   options?: string[];
   answer_index?: number;
   points: number;
   model_answer: string;
   grading_criteria: string[];
+  tables?: DataTable[];
+  answer_tables?: DataTable[];
 };
 export type Exam = {
+  discipline?: string;
   title: string;
   duration_minutes: number;
   instructions: string;

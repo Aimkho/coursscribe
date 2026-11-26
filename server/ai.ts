@@ -17,7 +17,7 @@ function ctx(meta: { title: string; subject: string; level: string }, transcript
   return `Titre : ${meta.title}\nMatière : ${meta.subject || "non précisée"}\nNiveau : ${meta.level || "non précisé"}\n\n<cours>\n${transcript}\n</cours>`;
 }
 
-export async function generateNotes(meta: { title: string; subject: string; level: string }, transcript: string, userId: number | null = null) {
+export async function generateNotes(meta: { title: string; subject: string; level: string }, transcript: string, userId: number | null = null, usageKind = "notes") {
   const system = `${BASE_RULES}
 Mission : transformer la transcription brute d'un cours (avec échanges, questions d'élèves, hésitations, digressions) en notes de cours structurées.
 - Garde : définitions, notions centrales, raisonnements, distinctions, formules, dates et chiffres utiles, exemples éclairants, consignes d'évaluation.
@@ -38,7 +38,7 @@ Format JSON :
  "to_verify": ["passages ambigus ou incomplets à vérifier"]
 }
 Les listes peuvent être vides si le cours n'en contient pas.`;
-  return askJson(system, ctx(meta, transcript), 9000, "notes", userId);
+  return askJson(system, ctx(meta, transcript), 9000, usageKind, userId);
 }
 
 export async function generateSheet(meta: { title: string; subject: string; level: string }, transcript: string, notes: unknown, userId: number | null = null) {
@@ -57,42 +57,70 @@ Produis 12 à 20 flashcards.`;
   return askJson(system, `${ctx(meta, transcript)}\n\nNotes déjà structurées :\n${JSON.stringify(notes)}`, 8000, "sheet", userId);
 }
 
+/**
+ * Adaptation à la discipline : l'IA identifie d'abord la matière réelle du cours (le champ « Matière » peut être vide ou vague)
+ * puis choisit les formats d'exercice qu'un professeur de cette matière donnerait réellement.
+ */
+const DISCIPLINE_RULES = `Étape 1 — Identifie la discipline exacte du cours à partir de son contenu (pas seulement du champ « Matière ») et indique-la dans "discipline" (ex. « Contrôle de gestion — coûts complets », « Mathématiques — fonctions exponentielles », « Droit des contrats », « Histoire — la guerre froide »).
+Étape 2 — Utilise les formats d'évaluation réellement pratiqués dans cette discipline et à ce niveau :
+- Comptabilité, gestion, finance, contrôle de gestion, économie d'entreprise : cas d'entreprise chiffré (société fictive, données en tableau : bilan, compte de résultat, tableau des charges, budget…), calculs étape par étape, tableau complété dans le corrigé, puis interprétation et recommandation.
+- Mathématiques, physique, chimie, statistiques, informatique : problèmes avec données numériques, démonstrations, calculs détaillés avec unités, tableaux de valeurs ou de variations, algorithmes.
+- SVT, biologie, médecine : analyse de documents (résultats expérimentaux en tableau), raisonnement scientifique, schéma décrit.
+- Droit : cas pratique juridique (faits → problème de droit → règle applicable → application → conclusion), commentaire d'article ou d'arrêt.
+- Histoire, géographie, sciences politiques : analyse de document, chronologie, composition structurée (plan détaillé).
+- Philosophie, lettres : problématisation, plan de dissertation, commentaire de texte.
+- Langues : compréhension, reformulation, traduction, production écrite guidée.
+- Marketing, management, RH : étude de cas d'entreprise avec diagnostic et recommandations argumentées.
+Étape 3 — Tableaux : dès que le cours manipule des données structurées (chiffres, comparaisons, classements, étapes), présente-les dans "tables" (énoncé) et "answer_tables" (corrigé : tableau rempli, calculs). Chaque tableau : {"title": "...", "headers": ["..."], "rows": [["...", "..."]]}. Toutes les lignes ont le même nombre de cellules que headers. Les nombres sont écrits au format français (1 250,50).
+Règles des cas pratiques : énoncé autonome (contexte, données complètes, questions numérotées 1), 2), 3)), données cohérentes et réalistes, corrigé complet qui détaille chaque calcul ou chaque étape du raisonnement. Tu peux créer des données nouvelles pour les cas pratiques, mais les méthodes, formules et notions viennent uniquement du cours.`;
+
+const TABLE_SCHEMA = `"tables": [{"title": "...", "headers": ["..."], "rows": [["..."]]}], "answer_tables": [{"title": "...", "headers": ["..."], "rows": [["..."]]}]`;
+
 export async function generateExercises(meta: { title: string; subject: string; level: string }, transcript: string, notes: unknown, userId: number | null = null, classBrief = "") {
   const system = `${BASE_RULES}
-Mission : créer une série d'exercices progressifs sur ce cours, avec corrigés détaillés.
-Produis 12 exercices : environ 5 QCM, 3 vrai/faux, 2 questions ouvertes, 2 exercices d'application (cas pratique, calcul ou analyse selon la matière).
-Répartis les difficultés : facile, moyen, difficile.
+Mission : créer une série d'exercices progressifs sur ce cours, avec corrigés détaillés, comme le ferait le professeur de la matière.
+${DISCIPLINE_RULES}
+Produis 12 exercices : 3 QCM, 2 vrai/faux, 2 questions de cours ("ouverte"), 2 exercices d'application courts ("application") et 3 cas pratiques complets ("cas_pratique") de difficulté croissante.
+Si le cours est purement théorique et sans données, remplace les calculs par des cas concrets à analyser, mais garde 3 cas pratiques.
 Format JSON :
 {
+ "discipline": "discipline identifiée",
  "items": [
   {"type": "qcm", "difficulty": "facile", "question": "...", "options": ["A","B","C","D"], "answer_index": 0, "model_answer": "réponse correcte", "explanation": "pourquoi, et pourquoi les autres sont fausses"},
   {"type": "vrai_faux", "difficulty": "moyen", "question": "affirmation", "answer_bool": true, "model_answer": "Vrai/Faux", "explanation": "..."},
   {"type": "ouverte", "difficulty": "moyen", "question": "...", "model_answer": "réponse modèle complète", "explanation": "éléments attendus"},
-  {"type": "application", "difficulty": "difficile", "question": "énoncé complet", "model_answer": "corrigé étape par étape", "explanation": "méthode"}
+  {"type": "application", "difficulty": "moyen", "question": "énoncé court", ${TABLE_SCHEMA}, "model_answer": "corrigé étape par étape", "explanation": "méthode"},
+  {"type": "cas_pratique", "difficulty": "difficile", "question": "contexte + questions numérotées", ${TABLE_SCHEMA}, "model_answer": "corrigé question par question, calculs détaillés", "explanation": "méthode à retenir et pièges"}
  ]
 }
-Les QCM ont 4 options, une seule correcte, à des positions variées.
-Si des exercices ont été faits en classe (bloc <exercices_classe>), les 2 exercices d'application doivent être des variantes de ces exercices : même méthode, données différentes, contexte différent. Ne recopie pas l'énoncé d'origine.`;
-  return askJson(system, `${ctx(meta, transcript)}\n\nNotes structurées :\n${JSON.stringify(notes)}${classBrief ? `\n\n<exercices_classe>\n${classBrief}\n</exercices_classe>` : ""}`, 9000, "exercises", userId);
+"tables" et "answer_tables" sont des listes vides si aucun tableau n'est utile. Les QCM ont 4 options, une seule correcte, à des positions variées.
+Si des exercices ont été faits en classe (bloc <exercices_classe>), au moins 2 cas pratiques sont des variantes de ces exercices : même méthode, données différentes, contexte différent. Ne recopie pas l'énoncé d'origine.`;
+  return askJson(system, `${ctx(meta, transcript)}\n\nNotes structurées :\n${JSON.stringify(notes)}${classBrief ? `\n\n<exercices_classe>\n${classBrief}\n</exercices_classe>` : ""}`, 16000, "exercises", userId);
 }
 
 export async function generateExam(meta: { title: string; subject: string; level: string }, transcript: string, notes: unknown, userId: number | null = null, classBrief = "") {
   const system = `${BASE_RULES}
-Mission : créer un examen blanc réaliste noté sur 20, adapté au niveau indiqué.
-Structure : une partie QCM (6 questions, 1 point chacune) puis une partie rédactionnelle (3 ou 4 questions ouvertes ou cas pratique, totalisant 14 points).
+Mission : créer un examen blanc réaliste noté sur 20, du type que donnerait le professeur de cette matière à ce niveau.
+${DISCIPLINE_RULES}
+Structure :
+- Partie 1 — QCM : 4 questions, 1 point chacune.
+- Partie 2 — Questions de cours : 2 ou 3 questions ("ouverte"), 4 à 6 points au total.
+- Partie 3 — Cas pratique ou exercice principal ("cas_pratique") : 1 ou 2 sujets, 10 à 12 points au total, avec un contexte, des données (tableaux si pertinent) et plusieurs questions numérotées.
 Format JSON :
 {
+ "discipline": "discipline identifiée",
  "title": "Examen blanc — ...",
- "duration_minutes": 45,
- "instructions": "consignes",
+ "duration_minutes": 60,
+ "instructions": "consignes (calculatrice, documents autorisés, etc. selon la matière)",
  "sections": [
   {"title": "Partie 1 — QCM", "questions": [{"id": "q1", "type": "qcm", "question": "...", "options": ["...","...","...","..."], "answer_index": 2, "points": 1, "model_answer": "...", "grading_criteria": ["..."]}]},
-  {"title": "Partie 2 — Questions rédigées", "questions": [{"id": "q7", "type": "ouverte", "question": "...", "points": 4, "model_answer": "corrigé complet", "grading_criteria": ["critère précis valant x point(s)"]}]}
+  {"title": "Partie 2 — Questions de cours", "questions": [{"id": "q5", "type": "ouverte", "question": "...", "points": 2, "model_answer": "corrigé complet", "grading_criteria": ["critère précis valant x point(s)"]}]},
+  {"title": "Partie 3 — Cas pratique", "questions": [{"id": "q8", "type": "cas_pratique", "question": "contexte + questions numérotées", ${TABLE_SCHEMA}, "points": 10, "model_answer": "corrigé question par question avec calculs", "grading_criteria": ["1) ... : x pt", "2) ... : x pt"]}]}
  ]
 }
-Les ids sont uniques (q1, q2, ...). Le total des points vaut 20.
-Si des exercices ont été faits en classe (bloc <exercices_classe>), le cas pratique de la partie 2 reprend leur méthode avec des données nouvelles, comme le ferait le prof le jour du contrôle.`;
-  return askJson(system, `${ctx(meta, transcript)}\n\nNotes structurées :\n${JSON.stringify(notes)}${classBrief ? `\n\n<exercices_classe>\n${classBrief}\n</exercices_classe>` : ""}`, 9000, "exam", userId);
+Les ids sont uniques (q1, q2, ...). Le total des points vaut exactement 20. Le barème du cas pratique détaille les points question par question.
+Si des exercices ont été faits en classe (bloc <exercices_classe>), le cas pratique reprend leur méthode avec des données nouvelles, comme le ferait le prof le jour du contrôle.`;
+  return askJson(system, `${ctx(meta, transcript)}\n\nNotes structurées :\n${JSON.stringify(notes)}${classBrief ? `\n\n<exercices_classe>\n${classBrief}\n</exercices_classe>` : ""}`, 16000, "exam", userId);
 }
 
 export async function gradeOpenAnswers(

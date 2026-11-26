@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { Link, useLocation } from "wouter";
-import { Globe2, LogOut, Mic, LayoutGrid, ShieldCheck } from "lucide-react";
+import { Globe2, LogOut, Mic, LayoutGrid, ShieldCheck, Crown } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { cn } from "@/lib/utils";
 
@@ -8,6 +8,7 @@ const NAV = [
   { href: "/", label: "Mes cours", icon: LayoutGrid, test: "nav-courses" },
   { href: "/record", label: "Enregistrer", icon: Mic, test: "nav-record" },
   { href: "/library", label: "Bibliothèque", icon: Globe2, test: "nav-library" },
+  { href: "/abonnement", label: "Abonnement", icon: Crown, test: "nav-billing" },
 ];
 
 export function BrandMark({ className }: { className?: string }) {
@@ -123,7 +124,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       </main>
 
       {/* Navigation basse mobile */}
-      <nav className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-3 border-t border-border bg-background pb-[env(safe-area-inset-bottom)] lg:hidden" aria-label="Navigation">
+      <nav className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-4 border-t border-border bg-background pb-[env(safe-area-inset-bottom)] lg:hidden" aria-label="Navigation">
         {NAV.map((n) => {
           const active = isActive(loc, n.href);
           return (

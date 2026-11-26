@@ -151,6 +151,17 @@ export default function RecordPage({ continueId, subjectId: presetSubject }: { c
     onMarker: (m) => setTranscript((p) => (p.trim() ? p.trimEnd() + "\n\n" : "") + m + "\n"),
   });
 
+  // Limite de l'offre atteinte : on met le micro en pause (la fenêtre d'abonnement s'affiche).
+  const recStateRef = useRef(rec.state);
+  recStateRef.current = rec.state;
+  useEffect(() => {
+    const on = (e: Event) => {
+      if ((e as CustomEvent).detail?.code === "quota_audio" && recStateRef.current === "recording") rec.pause();
+    };
+    window.addEventListener("cs:quota", on);
+    return () => window.removeEventListener("cs:quota", on);
+  }, []);
+
   useEffect(() => {
     rec.setThreshold([0.05, 0.03, 0.018, 0.01][sensitivity]);
   }, [sensitivity]);

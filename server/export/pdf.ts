@@ -240,6 +240,58 @@ export function renderPdf(course: Course, rawBlocks: Block[]): Promise<Buffer> {
           doc.y += 10;
           break;
         }
+        case "table": {
+          const cols = Math.max(b.headers.length, ...b.rows.map((r) => r.length), 1);
+          const X = L + 28;
+          const TW = W - 28;
+          const fs = cols > 5 ? 8 : 9;
+          // Colonne 1 (libellés) plus large que les colonnes de chiffres.
+          const first = cols === 1 ? TW : Math.min(TW * 0.42, TW / cols * 1.6);
+          const other = cols === 1 ? 0 : (TW - first) / (cols - 1);
+          const cw = (i: number) => (i === 0 ? first : other);
+          const num = (v: string) => /\d/.test(v) && /^[-+−(]?[\d\s .,]+\)?\s?(€|%|k€|M€|h|kg|m|s)?$/.test(v.trim());
+          const rowH = (cells: string[], font: string) =>
+            Math.max(...Array.from({ length: cols }, (_, i) => textH(cells[i] || "", font, fs, cw(i) - 10, { lineGap: 1 }))) + 8;
+          const head = b.headers.length ? b.headers : null;
+          const headH = head ? rowH(head, "B") : 0;
+          const drawHead = () => {
+            if (!head) return;
+            const y = doc.y;
+            doc.rect(X, y, TW, headH).fill(b.tone === "dark" ? C.ink : C.violet);
+            let x = X;
+            head.forEach((h, i) => {
+              doc.font("B").fontSize(fs).fillColor("#FFFFFF").text(h, x + 5, y + 4, { width: cw(i) - 10, lineGap: 1, align: i > 0 ? "right" : "left" });
+              x += cw(i);
+            });
+            doc.y = y + headH;
+          };
+          const titleH = b.title ? textH(b.title, "B", 8.5, TW) + 4 : 0;
+          ensure(titleH + headH + (b.rows[0] ? rowH(b.rows[0], "R") : 0) + 6);
+          if (b.title) doc.font("B").fontSize(8.5).fillColor(C.violet).text(b.title.toUpperCase(), X, doc.y, { width: TW, characterSpacing: 0.6 });
+          doc.y += 3;
+          drawHead();
+          b.rows.forEach((r, ri) => {
+            const bold = /^(total|résultat|marge|ebe|caf|ca\b|solde)/i.test(r[0] || "");
+            const h = rowH(r, bold ? "B" : "R");
+            if (doc.y + h > bottom()) {
+              doc.addPage();
+              drawHead();
+            }
+            const y = doc.y;
+            if (ri % 2 === 1 || bold) doc.rect(X, y, TW, h).fill(bold ? (b.tone === "dark" ? C.roseSoft : C.soft) : "#FAF8FF");
+            let x = X;
+            for (let i = 0; i < cols; i++) {
+              const v = r[i] || "";
+              doc.font(bold ? "B" : "R").fontSize(fs).fillColor(C.text).text(v, x + 5, y + 4, { width: cw(i) - 10, lineGap: 1, align: i > 0 && num(v) ? "right" : "left" });
+              x += cw(i);
+            }
+            doc.moveTo(X, y + h).lineTo(X + TW, y + h).lineWidth(0.5).strokeColor(C.line).stroke();
+            doc.y = y + h;
+          });
+          doc.x = L;
+          doc.y += 12;
+          break;
+        }
         case "answer": {
           const af = b.text.length > 140 ? "R" : "B";
           const ht = textH(b.text, af, 10, W - 28);

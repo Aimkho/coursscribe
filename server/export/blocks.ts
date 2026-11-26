@@ -14,17 +14,22 @@ export type Block =
   | { t: "qa"; q: string; a: string }
   | { t: "tags"; items: string[] }
   | { t: "question"; n: number; meta: string; text: string; options?: string[] }
-  | { t: "answer"; n: number; text: string; explanation?: string };
+  | { t: "answer"; n: number; text: string; explanation?: string }
+  | { t: "table"; title: string; headers: string[]; rows: string[][]; tone?: "violet" | "dark" };
 
 export type ExportPart = "notes" | "sheet" | "class" | "exercises" | "exam";
 export const ALL_PARTS: ExportPart[] = ["notes", "sheet", "class", "exercises", "exam"];
 
 const LETTERS = "ABCDEFGH";
 const DIFF: Record<string, string> = { facile: "Facile", moyen: "Moyen", difficile: "Difficile" };
-const TYPE: Record<string, string> = { qcm: "QCM", vrai_faux: "Vrai ou faux", ouverte: "Question ouverte", application: "Application" };
+const TYPE: Record<string, string> = { qcm: "QCM", vrai_faux: "Vrai ou faux", ouverte: "Question ouverte", application: "Application", cas_pratique: "Cas pratique" };
 
 const clean = (s: unknown) => (typeof s === "string" ? s.trim() : "");
 const list = (a: unknown): string[] => (Array.isArray(a) ? a.map(clean).filter(Boolean) : []);
+const tables = (ts: unknown, tone: "violet" | "dark" = "violet"): Block[] =>
+  (Array.isArray(ts) ? ts : [])
+    .filter((t: any) => Array.isArray(t?.rows) && t.rows.length)
+    .map((t: any) => ({ t: "table" as const, title: clean(t.title), headers: Array.isArray(t.headers) ? t.headers.map(String) : [], rows: t.rows.map((r: any) => (Array.isArray(r) ? r.map(String) : [])), tone }));
 
 export function courseMeta(c: Course) {
   const date = new Date(c.createdAt).toLocaleDateString("fr-FR", { day: "numeric", month: "long", year: "numeric" });
@@ -131,6 +136,7 @@ export function buildBlocks(c: Course, parts: ExportPart[], withAnswers = true):
       const opts =
         e.type === "qcm" ? list(e.options) : e.type === "vrai_faux" ? ["Vrai", "Faux"] : undefined;
       out.push({ t: "question", n: i + 1, meta: `${TYPE[e.type] || "Exercice"} · ${DIFF[e.difficulty] || ""}`, text: clean(e.question), options: opts });
+      out.push(...tables(e.tables));
     });
     if (withAnswers) {
       out.push({ t: "h2", text: "Corrigé des exercices" });
@@ -146,6 +152,7 @@ export function buildBlocks(c: Course, parts: ExportPart[], withAnswers = true):
           if (!expl) expl = clean(e.model_answer);
         }
         out.push({ t: "answer", n: i + 1, text: ans, explanation: expl });
+        out.push(...tables(e.answer_tables, "dark"));
       });
     }
   }
@@ -161,6 +168,7 @@ export function buildBlocks(c: Course, parts: ExportPart[], withAnswers = true):
       sec.questions.forEach((q) => {
         k++;
         out.push({ t: "question", n: k, meta: `${q.points} pt${q.points > 1 ? "s" : ""}`, text: clean(q.question), options: q.type === "qcm" ? list(q.options) : undefined });
+        out.push(...tables(q.tables));
       });
     });
     if (withAnswers) {
@@ -173,6 +181,7 @@ export function buildBlocks(c: Course, parts: ExportPart[], withAnswers = true):
           if (q.type === "qcm" && typeof q.answer_index === "number") ans = `${LETTERS[q.answer_index] ?? ""}. ${list(q.options)[q.answer_index] ?? ans}`;
           const crit = list(q.grading_criteria);
           out.push({ t: "answer", n: k, text: ans, explanation: crit.length ? `Barème : ${crit.join(" ; ")}` : undefined });
+          out.push(...tables(q.answer_tables, "dark"));
         }),
       );
     }

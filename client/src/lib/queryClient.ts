@@ -45,6 +45,7 @@ async function throwIfResNotOk(res: Response) {
       const body = await res.json();
       message = body.message || message;
       if (res.status === 403 && body.code === "consent_required" && onConsentRequired) onConsentRequired();
+      if (res.status === 402 && typeof window !== "undefined") window.dispatchEvent(new CustomEvent("cs:quota", { detail: body }));
     } catch {
       /* corps non JSON */
     }

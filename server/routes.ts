@@ -14,6 +14,7 @@ import { buildBlocks, ALL_PARTS, safeFileName, type ExportPart } from "./export/
 import { renderPdf } from "./export/pdf";
 import { renderDocx } from "./export/docx";
 import { renderPptx } from "./export/pptx";
+import { billingState, quotaError, verifyStripeSignature, handleStripeEvent, checkoutUrl, portalUrl, PLANS, invalidateBilling } from "./billing";
 import { generateNotes, generateSheet, generateExercises, generateExam, gradeOpenAnswers, generateClassExercises, classExercisesBrief } from "./ai";
 
 /** Version du texte de consentement : l'incrémenter redemande l'accord à tous les utilisateurs. */
@@ -121,10 +122,23 @@ function normalizeSheet(s: any) {
     checklist: arr(s.checklist).map(str),
   };
 }
-const TYPES = ["qcm", "vrai_faux", "ouverte", "application"];
+const TYPES = ["qcm", "vrai_faux", "ouverte", "application", "cas_pratique"];
 const DIFFS = ["facile", "moyen", "difficile"];
+function normalizeTables(v: any) {
+  return arr(v)
+    .map((t: any) => {
+      const headers = arr(t?.headers).map(str);
+      const width = Math.max(headers.length, ...arr(t?.rows).map((r: any) => arr(r).length), 0);
+      if (!width) return null;
+      const pad = (cells: string[]) => [...cells, ...Array(Math.max(0, width - cells.length)).fill("")].slice(0, width);
+      return { title: str(t?.title), headers: headers.length ? pad(headers) : [], rows: arr(t?.rows).map((r: any) => pad(arr(r).map(str))).filter((r: string[]) => r.some(Boolean)).slice(0, 40) };
+    })
+    .filter((t: any) => t && t.rows.length)
+    .slice(0, 4);
+}
 function normalizeExercises(e: any) {
   return {
+    discipline: str(e.discipline),
     items: arr(e.items)
       .map((i: any) => ({
         type: TYPES.includes(i.type) ? i.type : "ouverte",
@@ -135,6 +149,8 @@ function normalizeExercises(e: any) {
         answer_bool: typeof i.answer_bool === "boolean" ? i.answer_bool : undefined,
         model_answer: str(i.model_answer),
         explanation: str(i.explanation),
+        tables: normalizeTables(i.tables),
+        answer_tables: normalizeTables(i.answer_tables),
       }))
       .filter((i: any) => i.question && (i.type !== "qcm" || (i.options?.length >= 2 && i.answer_index !== undefined))),
   };
@@ -142,6 +158,7 @@ function normalizeExercises(e: any) {
 function normalizeExam(x: any): Exam {
   let n = 0;
   return {
+    discipline: str(x.discipline),
     title: str(x.title) || "Examen blanc",
     duration_minutes: Number(x.duration_minutes) > 0 ? Math.min(240, Number(x.duration_minutes)) : 45,
     instructions: str(x.instructions),
@@ -150,13 +167,15 @@ function normalizeExam(x: any): Exam {
       questions: arr(s.questions)
         .map((q: any) => ({
           id: `q${++n}`,
-          type: q.type === "qcm" ? "qcm" : "ouverte",
+          type: q.type === "qcm" ? "qcm" : q.type === "cas_pratique" ? "cas_pratique" : "ouverte",
           question: str(q.question),
           options: q.type === "qcm" ? arr(q.options).map(str) : undefined,
           answer_index: typeof q.answer_index === "number" ? q.answer_index : undefined,
           points: Number(q.points) > 0 ? Number(q.points) : 1,
           model_answer: str(q.model_answer),
           grading_criteria: arr(q.grading_criteria).map(str),
+          tables: normalizeTables(q.tables),
+          answer_tables: normalizeTables(q.answer_tables),
         }))
         .filter((q: any) => q.question),
     })),
@@ -267,6 +286,32 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     await Promise.all(ids.map((id) => removeCourseAudio(id)));
     await storage.deleteUser(req.user!.id);
     res.json({ ok: true });
+  }));
+
+  // ---------- Abonnement (Stripe) ----------
+  app.post("/api/stripe/webhook", async (req: any, res) => {
+    const secret = process.env.STRIPE_WEBHOOK_SECRET;
+    const raw: Buffer | undefined = Buffer.isBuffer(req.rawBody) ? req.rawBody : undefined;
+    const sig = String(req.headers["stripe-signature"] || "");
+    if (!secret || !raw || !verifyStripeSignature(raw, sig, secret)) return res.status(400).json({ message: "Signature invalide." });
+    try {
+      const r = await handleStripeEvent(JSON.parse(raw.toString("utf8")));
+      res.json({ received: true, result: r });
+    } catch (e: any) {
+      logErr(`stripe webhook ${e?.message}`);
+      res.status(500).json({ message: "Erreur de traitement." });
+    }
+  });
+
+  app.get("/api/billing", auth, h(async (req, res) => {
+    const u = req.user!;
+    const state = await billingState(u, req.query.fresh === "1");
+    res.json({
+      ...state,
+      plans: PLANS,
+      checkout: { week: checkoutUrl("week", u), month: checkoutUrl("month", u), year: checkoutUrl("year", u) },
+      portal: portalUrl(u),
+    });
   }));
 
   // ---------- Matières ----------
@@ -557,6 +602,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     express.raw({ type: () => true, limit: "20mb" }),
     async (req: AuthedRequest, res) => {
       if (!Buffer.isBuffer(req.body) || req.body.length < 800) return res.json({ text: "" });
+      const quota = await quotaError(req.user!, "audio").catch(() => null);
+      if (quota) return res.status(402).json(quota);
       const mime = String(req.headers["content-type"] || "audio/webm").split(";")[0] || "audio/webm";
       const context = String(req.query.context || "").slice(0, 300);
       try {
@@ -584,6 +631,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     const mime = String(req.body?.mime || "").split(";")[0] || "audio/mpeg";
     if (size < 2000) return res.status(400).json({ message: "Fichier audio vide ou illisible." });
     if (size > IMPORT_MAX_BYTES) return res.status(400).json({ message: "Fichier trop volumineux (500 Mo maximum)." });
+    const quota = await quotaError(req.user!, "audio");
+    if (quota) return res.status(402).json(quota);
     const id = await createImport(req.user!.id, size, mime, String(req.body?.name || "cours"));
     res.json({ id, chunkSize: IMPORT_CHUNK });
   }));
@@ -607,6 +656,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.post("/api/import/:id/part", auth, requireConsent, h(async (req, res) => {
     const start = Math.max(0, Number(req.body?.start) || 0);
     const end = Math.max(start + 1, Number(req.body?.end) || 0);
+    const quota = await quotaError(req.user!, "audio", Math.min(end - start, 3600));
+    if (quota) return res.status(402).json(quota);
     try {
       const r = await importTranscribePart(Number(req.params.id), req.user!.id, start, Math.min(end, start + 3600), Number(req.body?.duration) || 0, String(req.body?.context || "").slice(0, 300));
       if ("error" in r) return res.status(404).json({ message: r.error });
@@ -632,6 +683,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     const atts = kind === "class" ? (await storage.listAttachments(row.id)).filter((a) => a.extracted) : [];
     if (words < 40 && !atts.length)
       return res.status(400).json({ message: `La transcription est trop courte (${words} mots). Il faut au moins 40 mots pour une analyse fiable.` });
+    const quota = await quotaError(req.user!, "gen");
+    if (quota) return res.status(402).json(quota);
     const key = `${row.id}:${kind}`;
     if (running.has(key)) return res.status(409).json({ message: "Une génération est déjà en cours pour ce contenu." });
     running.add(key);
@@ -649,7 +702,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         );
         patch.classExercises = normalizeClassExercises(raw, new Set(atts.map((a) => a.id)));
       } else if (kind === "notes" || !notes) {
-        notes = normalizeNotes(await generateNotes(meta, row.transcript, req.user!.id));
+        // Notes créées en préalable d'un autre contenu : non décomptées du quota (kind « notes_auto »).
+        notes = normalizeNotes(await generateNotes(meta, row.transcript, req.user!.id, kind === "notes" ? "notes" : "notes_auto"));
         patch.notes = notes;
         patch.analyzedAt = started;
       }
@@ -658,6 +712,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       if (kind === "exercises") patch.exercises = normalizeExercises(await generateExercises(meta, row.transcript, notes, req.user!.id, brief));
       if (kind === "exam") patch.exam = normalizeExam(await generateExam(meta, row.transcript, notes, req.user!.id, brief));
       const updated = (await storage.updateCourse(row.id, req.user!.id, patch))!;
+      invalidateBilling(req.user!.id);
       res.json(await toCourse(updated, req.user!.id));
     } catch (e: any) {
       logErr(`generation ${kind} ${e?.status ?? ""} ${e?.message}`);
@@ -686,7 +741,15 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
           feedback: ok ? "Bonne réponse." : `Réponse attendue : ${q.options?.[q.answer_index ?? 0] ?? q.model_answer}`,
         });
       } else {
-        open.push({ id: q.id, question: q.question, points: q.points, model_answer: q.model_answer, grading_criteria: q.grading_criteria, answer: str(answers[q.id]).slice(0, 8000) });
+        const tbl = (ts?: any[]) => (ts || []).map((t) => `${t.title}\n${[t.headers, ...t.rows].map((r: string[]) => r.join(" | ")).join("\n")}`).join("\n\n");
+        open.push({
+          id: q.id,
+          question: q.tables?.length ? `${q.question}\n\nDonnées :\n${tbl(q.tables)}` : q.question,
+          points: q.points,
+          model_answer: q.answer_tables?.length ? `${q.model_answer}\n\nTableaux attendus :\n${tbl(q.answer_tables)}` : q.model_answer,
+          grading_criteria: q.grading_criteria,
+          answer: str(answers[q.id]).slice(0, 12000),
+        });
       }
     }
     let overall = "";

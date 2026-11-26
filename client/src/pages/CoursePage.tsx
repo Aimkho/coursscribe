@@ -351,6 +351,11 @@ export default function CoursePage({ id, publicView }: { id: number; publicView?
                 <User2 className="h-3.5 w-3.5" /> {course.ownerName}
               </span>
             )}
+            {!owner && (
+              <span className="inline-flex items-center rounded-full bg-secondary px-2 py-0.5 text-xs font-semibold text-secondary-foreground" data-testid="badge-readonly">
+                Lecture seule
+              </span>
+            )}
             <span>
               {formatDate(course.createdAt)}
               {course.sessions.length > 1 && formatDate(course.sessions[course.sessions.length - 1].startedAt) !== formatDate(course.createdAt)

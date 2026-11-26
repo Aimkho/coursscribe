@@ -22,7 +22,7 @@ import {
   Link2,
   ListChecks,
 } from "lucide-react";
-import type { Notes, Sheet, Exercises, Exercise, Exam, ExamGrade } from "@shared/schema";
+import type { Notes, Sheet, Exercises, Exercise, Exam, ExamGrade, DataTable } from "@shared/schema";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
@@ -369,12 +369,54 @@ export function SheetView({ sheet }: { sheet: Sheet }) {
   );
 }
 
+// ---------------- TABLEAUX ----------------
+const isNum = (v: string) => /^[-+−]?[\d\s .,]+(?:\s?(?:€|%|k€|M€|h|kg|m|s))?$/.test(v.trim()) && /\d/.test(v);
+export function DataTables({ tables, tone = "violet" }: { tables?: DataTable[]; tone?: "violet" | "dark" }) {
+  if (!tables?.length) return null;
+  return (
+    <div className="mt-4 space-y-4">
+      {tables.map((t, ti) => (
+        <figure key={ti} className="min-w-0">
+          {t.title && <figcaption className="mb-1.5 text-xs font-semibold uppercase tracking-[0.12em] text-primary">{t.title}</figcaption>}
+          <div className="overflow-x-auto rounded-xl border border-border">
+            <table className="w-full min-w-max border-collapse text-sm" data-testid="data-table">
+              {t.headers.length > 0 && (
+                <thead>
+                  <tr className={tone === "dark" ? "bg-[#1A1033] text-white" : "bg-[#7D4FFE]/10 text-foreground"}>
+                    {t.headers.map((h, i) => (
+                      <th key={i} className={cn("px-3 py-2 text-left font-semibold", i > 0 && "text-right")}>
+                        {h}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+              )}
+              <tbody>
+                {t.rows.map((row, ri) => (
+                  <tr key={ri} className={cn("border-t border-border", ri % 2 === 1 && "bg-muted/40", /^total|^résultat|^marge|^ebe|^ca\b/i.test(row[0] || "") && "font-semibold")}>
+                    {row.map((c, ci) => (
+                      <td key={ci} className={cn("px-3 py-2 align-top", ci > 0 && isNum(c) && "text-right tabular-nums")}>
+                        {c}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </figure>
+      ))}
+    </div>
+  );
+}
+
 // ---------------- EXERCICES ----------------
 const TYPE_LABEL: Record<Exercise["type"], string> = {
   qcm: "QCM",
   vrai_faux: "Vrai ou faux",
-  ouverte: "Question ouverte",
+  ouverte: "Question de cours",
   application: "Application",
+  cas_pratique: "Cas pratique",
 };
 const DIFF_STYLE: Record<Exercise["difficulty"], string> = {
   facile: "bg-secondary text-secondary-foreground",
@@ -416,6 +458,7 @@ function ExerciseCard({ ex, n, onResult }: { ex: Exercise; n: number; onResult: 
         )}
       </div>
       <p className="whitespace-pre-line text-[15px] font-medium leading-7">{ex.question}</p>
+      <DataTables tables={ex.tables} />
 
       {ex.type === "qcm" && (
         <div className="mt-4 grid gap-2">
@@ -472,7 +515,7 @@ function ExerciseCard({ ex, n, onResult }: { ex: Exercise; n: number; onResult: 
           value={text}
           onChange={(e) => setText(e.target.value)}
           placeholder="Rédige ta réponse avant de regarder le corrigé…"
-          className="mt-4 min-h-[110px] text-sm leading-6"
+          className={cn("mt-4 text-sm leading-6", ex.type === "cas_pratique" ? "min-h-[200px]" : "min-h-[110px]")}
           disabled={revealed}
           data-testid={`textarea-exercise-${n}`}
         />
@@ -482,6 +525,7 @@ function ExerciseCard({ ex, n, onResult }: { ex: Exercise; n: number; onResult: 
         <div className="mt-4 rounded-xl bg-muted/70 p-4">
           <p className="text-xs font-semibold uppercase tracking-wider text-primary">Corrigé</p>
           <p className="mt-1.5 whitespace-pre-line text-sm leading-6">{ex.model_answer}</p>
+          <DataTables tables={ex.answer_tables} tone="dark" />
           {ex.explanation && <p className="mt-2 whitespace-pre-line text-sm leading-6 text-muted-foreground">{ex.explanation}</p>}
         </div>
       )}
@@ -520,6 +564,11 @@ export function ExercisesView({ exercises }: { exercises: Exercises }) {
   const good = auto.filter(Boolean).length;
   return (
     <div data-testid="view-exercises">
+      {exercises.discipline && (
+        <p className="mb-3 inline-flex items-center gap-2 rounded-full bg-secondary px-3 py-1 text-xs font-semibold text-secondary-foreground" data-testid="text-discipline">
+          <Target className="h-3.5 w-3.5" /> {exercises.discipline}
+        </p>
+      )}
       <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
         <div className="flex flex-wrap gap-2">
           {(["tous", "facile", "moyen", "difficile"] as const).map((f) => (
@@ -542,7 +591,9 @@ export function ExercisesView({ exercises }: { exercises: Exercises }) {
       </div>
       <div className="grid gap-4 xl:grid-cols-2">
         {list.map(({ ex, i }) => (
-          <ExerciseCard key={i} ex={ex} n={i + 1} onResult={(r) => setResults((s) => ({ ...s, [i]: r }))} />
+          <div key={i} className={cn("min-w-0", (ex.type === "cas_pratique" || ex.tables?.length) && "xl:col-span-2")}>
+            <ExerciseCard ex={ex} n={i + 1} onResult={(r) => setResults((s) => ({ ...s, [i]: r }))} />
+          </div>
         ))}
       </div>
     </div>
@@ -586,7 +637,8 @@ export function ExamView({ exam, courseId }: { exam: Exam; courseId: number }) {
           <span className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-primary text-primary-foreground">
             <Trophy className="h-5 w-5" />
           </span>
-          <h3 className="mt-4 font-display text-xl font-bold">{exam.title}</h3>
+          {exam.discipline && <p className="mt-4 text-xs font-semibold uppercase tracking-[0.14em] text-primary" data-testid="text-exam-discipline">{exam.discipline}</p>}
+          <h3 className="mt-2 font-display text-xl font-bold">{exam.title}</h3>
           <div className="mt-4 flex flex-wrap justify-center gap-3 text-sm">
             <span className="inline-flex items-center gap-1.5 rounded-full bg-muted px-3 py-1">
               <Clock className="h-4 w-4 text-primary" /> {exam.duration_minutes} min
@@ -649,18 +701,20 @@ export function ExamView({ exam, courseId }: { exam: Exam; courseId: number }) {
                 return (
                   <div key={q.id} className="rounded-xl border border-border p-4">
                     <div className="flex items-start justify-between gap-3">
-                      <p className="text-sm font-medium leading-6">{q.question}</p>
+                      <p className="whitespace-pre-line text-sm font-medium leading-6">{q.question}</p>
                       <span className={cn("shrink-0 rounded-md px-2 py-0.5 text-xs font-bold tabular-nums", full ? "bg-secondary text-primary" : "bg-[#8A0D1E]/10 text-[#8A0D1E]")}>
                         {g?.points_awarded ?? 0}/{q.points}
                       </span>
                     </div>
-                    {q.type === "ouverte" && answers[q.id] && (
+                    <DataTables tables={q.tables} />
+                    {q.type !== "qcm" && answers[q.id] && (
                       <p className="mt-2 whitespace-pre-line rounded-lg bg-muted/60 px-3 py-2 text-sm leading-6 text-muted-foreground">{answers[q.id]}</p>
                     )}
                     {g?.feedback && <p className="mt-2 text-sm leading-6">{g.feedback}</p>}
                     <details className="mt-2">
                       <summary className="cursor-pointer text-xs font-semibold text-primary">Voir le corrigé</summary>
                       <p className="mt-1.5 whitespace-pre-line text-sm leading-6 text-foreground/85">{q.model_answer}</p>
+                      <DataTables tables={q.answer_tables} tone="dark" />
                     </details>
                   </div>
                 );
@@ -716,12 +770,13 @@ export function ExamView({ exam, courseId }: { exam: Exam; courseId: number }) {
               {s.questions.map((q, qi) => (
                 <div key={q.id}>
                   <div className="flex items-start justify-between gap-3">
-                    <p className="text-[15px] font-medium leading-7">
+                    <p className="min-w-0 whitespace-pre-line text-[15px] font-medium leading-7">
                       <span className="mr-1.5 text-primary">{qi + 1}.</span>
                       {q.question}
                     </p>
                     <span className="shrink-0 text-xs text-muted-foreground">{q.points} pt{q.points > 1 ? "s" : ""}</span>
                   </div>
+                  <DataTables tables={q.tables} />
                   {q.type === "qcm" ? (
                     <div className="mt-3 grid gap-2 sm:grid-cols-2">
                       {q.options?.map((o, i) => (
@@ -743,8 +798,8 @@ export function ExamView({ exam, courseId }: { exam: Exam; courseId: number }) {
                     <Textarea
                       value={answers[q.id] ?? ""}
                       onChange={(e) => setAnswers((a) => ({ ...a, [q.id]: e.target.value }))}
-                      className="mt-3 min-h-[140px] text-base leading-6 md:text-sm"
-                      placeholder="Ta réponse…"
+                      className={cn("mt-3 text-base leading-6 md:text-sm", q.type === "cas_pratique" ? "min-h-[260px]" : "min-h-[140px]")}
+                      placeholder={q.type === "cas_pratique" ? "Réponds question par question (1), 2), 3)…) en détaillant tes calculs…" : "Ta réponse…"}
                       data-testid={`exam-answer-${q.id}`}
                     />
                   )}
