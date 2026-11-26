@@ -25,14 +25,14 @@ const TABLE_RULES = `Tableaux : format {"title": "...", "headers": ["..."], "row
 
 const TABLE_SCHEMA = `"tables": [{"title": "...", "headers": ["..."], "rows": [["..."]]}], "answer_tables": [{"title": "...", "headers": ["..."], "rows": [["..."]]}]`;
 
-export async function generateNotes(meta: { title: string; subject: string; level: string }, transcript: string, userId: number | null = null, usageKind = "notes") {
+async function notesOnce(meta: { title: string; subject: string; level: string }, transcript: string, userId: number | null, usageKind: string, part = "") {
   const system = `${BASE_RULES}
-Mission : transformer la transcription brute d'un cours (échanges, questions d'élèves, hésitations, digressions) en notes de cours complètes et bien développées, qui permettent de comprendre le cours sans y avoir assisté.
+Mission : transformer la transcription brute d'un cours (parfois plusieurs heures, sur plusieurs séances) (échanges, questions d'élèves, hésitations, digressions) en notes de cours complètes et bien développées, qui permettent de comprendre le cours sans y avoir assisté.
 ${DISCIPLINE_ID}
 Contenu :
 - Garde tout le fond : définitions, notions, raisonnements, distinctions, formules, méthodes, dates, chiffres, exemples, consignes d'évaluation. Rien d'important ne doit manquer.
 - Supprime : salutations, logistique, répétitions, hésitations, digressions hors sujet. Ne recopie jamais la transcription : reformule.
-- Plan : suis la logique du cours. Chaque partie a des points précis et une explication développée (5 à 10 phrases) qui explique le pourquoi, pas seulement le quoi. Tu peux clarifier une notion enseignée avec une explication standard de la discipline, mais n'ajoute pas de notion que le prof n'a pas abordée.
+- Plan : suis la logique du cours. Un cours long a beaucoup de parties (une par grande notion ou séquence, souvent 8 à 15 pour plusieurs heures) : ne résume pas plusieurs heures en quelques lignes. Chaque partie a des points précis et une explication développée (5 à 10 phrases) qui explique le pourquoi, pas seulement le quoi. Tu peux clarifier une notion enseignée avec une explication standard de la discipline, mais n'ajoute pas de notion que le prof n'a pas abordée.
 - Méthodes : chaque démarche enseignée (calcul, construction d'un tableau, raisonnement juridique, analyse de document, démonstration, rédaction) devient une méthode pas à pas.
 - Tableaux : restitue en tableau tout ce qui s'y prête : structure d'un état financier (ex. les trois flux du tableau de trésorerie et leurs composantes), comparaison de notions, chronologie, classification, conjugaison, tableau de variations.
 - Questions d'élèves : garde-les seulement si la réponse apporte une explication utile, reformulée.
@@ -54,7 +54,74 @@ Format JSON :
  "to_verify": ["passages ambigus ou incomplets à vérifier"]
 }
 Les listes peuvent être vides si le cours n'en contient pas.`;
-  return askJson(system, ctx(meta, transcript), 16000, usageKind, userId, { thinking: 4000, temperature: 0.3 });
+  // Cours long (plusieurs heures) : plus de place pour des notes complètes.
+  const long = transcript.length > 60_000;
+  return askJson(part ? `${system}\n${part}` : system, ctx(meta, transcript), long ? 32000 : 16000, usageKind, userId, { thinking: 4000, temperature: 0.3, timeoutMs: 140_000 });
+}
+
+/** Découpe une longue transcription en parties d'environ `size` caractères, sur des fins de phrase. */
+function splitTranscript(t: string, size: number): string[] {
+  const parts: string[] = [];
+  let rest = t;
+  while (rest.length > size * 1.3) {
+    const slice = rest.slice(0, size);
+    const cut = Math.max(slice.lastIndexOf("\n"), slice.lastIndexOf(". "), slice.lastIndexOf("? "), slice.lastIndexOf("! "));
+    const at = cut > size * 0.6 ? cut + 1 : size;
+    parts.push(rest.slice(0, at));
+    rest = rest.slice(at);
+  }
+  if (rest.trim()) parts.push(rest);
+  return parts;
+}
+
+/**
+ * Notes de cours. Un cours long (plusieurs heures) est traité partie par partie, en parallèle,
+ * pour que chaque heure de cours soit développée, puis une synthèse donne l'idée centrale et le résumé.
+ */
+export async function generateNotes(meta: { title: string; subject: string; level: string }, transcript: string, userId: number | null = null, usageKind = "notes") {
+  if (transcript.length <= 50_000) return notesOnce(meta, transcript, userId, usageKind);
+  const chunks = splitTranscript(transcript, 38_000).slice(0, 10);
+  const parts = await Promise.all(
+    chunks.map((c, i) =>
+      notesOnce(meta, c, userId, "notes_part", `Ce texte est la partie ${i + 1} sur ${chunks.length} d'un long cours. Produis les notes complètes et développées de cette partie seulement, sans en résumer les autres. Le plan doit couvrir toute la partie.`).catch(() => null),
+    ),
+  );
+  const ok = parts.filter(Boolean) as any[];
+  if (!ok.length) throw new Error("notes: aucune partie générée");
+  const cat = (k: string) => ok.flatMap((p) => (Array.isArray(p?.[k]) ? p[k] : []));
+  const uniq = <T,>(arr: T[], key: (x: T) => string) => {
+    const seen = new Set<string>();
+    return arr.filter((x) => {
+      const k = key(x).toLowerCase().trim();
+      if (!k || seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+  };
+  const merged: any = {
+    plan: cat("plan"),
+    definitions: uniq(cat("definitions"), (d: any) => String(d?.term ?? "")),
+    formulas: uniq(cat("formulas"), (f: any) => String(f?.expression ?? f?.label ?? "")),
+    methods: uniq(cat("methods"), (m: any) => String(m?.title ?? "")),
+    tables: cat("tables"),
+    examples: cat("examples"),
+    student_questions: cat("student_questions"),
+    to_verify: cat("to_verify"),
+  };
+  const system = `${BASE_RULES}
+Tu reçois le plan détaillé des notes d'un long cours, produit partie par partie. Rédige la synthèse globale.
+${DISCIPLINE_ID}
+Format JSON : {"discipline": "...", "title": "titre clair du cours", "central_idea": "idée centrale en 1-2 phrases", "summary": "résumé de tout le cours en 8 à 14 phrases, dans l'ordre du cours", "keywords": ["8 à 18 mots-clés"]}`;
+  const outline = merged.plan.map((p: any, i: number) => `${i + 1}. ${p?.heading}\n- ${(p?.points || []).join("\n- ")}`).join("\n\n");
+  const head = await askJson(system, `Titre : ${meta.title}\nMatière : ${meta.subject}\nNiveau : ${meta.level}\n\n<cours>\n${outline.slice(0, 60_000)}\n</cours>`, 4000, usageKind, userId, { thinking: 2048, temperature: 0.3 }).catch(() => ({}) as any);
+  return {
+    discipline: head.discipline || ok[0].discipline,
+    title: head.title || ok[0].title,
+    central_idea: head.central_idea || ok[0].central_idea,
+    summary: head.summary || ok.map((p) => p.summary).join(" "),
+    keywords: Array.isArray(head.keywords) && head.keywords.length ? head.keywords : uniq(cat("keywords"), (k: any) => String(k)),
+    ...merged,
+  };
 }
 
 export async function generateSheet(meta: { title: string; subject: string; level: string }, transcript: string, notes: unknown, userId: number | null = null) {
@@ -81,7 +148,7 @@ Format JSON :
  "flashcards": [{"front": "question ou notion", "back": "réponse courte et exacte"}],
  "checklist": ["Je sais ..."]
 }`;
-  return askJson(system, `${ctx(meta, transcript)}\n\nNotes déjà structurées :\n${JSON.stringify(notes)}`, 14000, "sheet", userId, { thinking: 4000, temperature: 0.3 });
+  return askJson(system, `${ctx(meta, transcript)}\n\nNotes déjà structurées :\n${JSON.stringify(notes)}`, transcript.length > 60_000 ? 22000 : 14000, "sheet", userId, { thinking: 4000, temperature: 0.3, timeoutMs: 140_000 });
 }
 
 const DISCIPLINE_RULES = `Étape 1 — ${DISCIPLINE_ID} Indique la discipline dans "discipline".

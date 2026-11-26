@@ -115,7 +115,7 @@ function normalizeNotes(n: any) {
     formulas: arr(n.formulas).map((d: any) => ({ label: str(d.label), expression: str(d.expression), meaning: str(d.meaning) })),
     discipline: str(n.discipline),
     methods: normalizeMethods(n.methods),
-    tables: normalizeTables(n.tables, 8),
+    tables: normalizeTables(n.tables, 12),
     student_questions: arr(n.student_questions).map((d: any) => ({ question: str(d.question), answer: str(d.answer) })),
     to_verify: arr(n.to_verify).map(str),
   };
