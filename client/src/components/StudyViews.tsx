@@ -49,11 +49,47 @@ function SectionTitle({ icon: Icon, children, tone = "violet" }: { icon: any; ch
 const panel = "rounded-2xl border border-card-border bg-card p-5 sm:p-6";
 
 // ---------------- NOTES ----------------
+type Method = { title: string; when: string; steps: string[] };
+function MethodsPanel({ title, methods }: { title: string; methods?: Method[] }) {
+  if (!methods?.length) return null;
+  return (
+    <div className={panel} data-testid="panel-methods">
+      <SectionTitle icon={ListChecks}>{title}</SectionTitle>
+      <div className="grid gap-4 md:grid-cols-2">
+        {methods.map((m, i) => (
+          <div key={i} className="min-w-0 rounded-xl border border-border bg-background p-4">
+            <p className="text-sm font-semibold">{m.title}</p>
+            {m.when && <p className="mt-0.5 text-xs leading-5 text-muted-foreground">{m.when}</p>}
+            <ol className="mt-3 space-y-2">
+              {m.steps.map((st, j) => (
+                <li key={j} className="flex gap-2.5 text-sm leading-6">
+                  <span className="grid h-5 w-5 shrink-0 place-items-center rounded-full bg-secondary text-[11px] font-bold text-primary">{j + 1}</span>
+                  <span className="min-w-0 break-anywhere">{st}</span>
+                </li>
+              ))}
+            </ol>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+function TablesPanel({ title, tables }: { title: string; tables?: DataTable[] }) {
+  if (!tables?.length) return null;
+  return (
+    <div className={panel} data-testid="panel-tables">
+      <SectionTitle icon={BookMarked}>{title}</SectionTitle>
+      <DataTables tables={tables} />
+    </div>
+  );
+}
+
 export function NotesView({ notes }: { notes: Notes }) {
   return (
     <div className="space-y-5" data-testid="view-notes">
       <div className="rounded-2xl bg-[#1A1033] p-6 text-white sm:p-8">
         <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[#C49FFF]">Idée centrale</p>
+        {notes.discipline && <p className="mt-1 text-xs text-white/60">{notes.discipline}</p>}
         <p className="mt-2 font-display text-lg font-bold leading-snug sm:text-xl">{notes.central_idea}</p>
         {notes.keywords.length > 0 && (
           <div className="mt-5 flex flex-wrap gap-1.5">
@@ -127,6 +163,9 @@ export function NotesView({ notes }: { notes: Notes }) {
           </div>
         )}
       </div>
+
+      <MethodsPanel title="Méthodes du cours" methods={notes.methods} />
+      <TablesPanel title="Tableaux du cours" tables={notes.tables} />
 
       {notes.examples.length > 0 && (
         <div className={panel}>
@@ -279,6 +318,23 @@ export function SheetView({ sheet }: { sheet: Sheet }) {
           ))}
         </ol>
       </div>
+
+      {(sheet.formulas?.length ?? 0) > 0 && (
+        <div className={panel} data-testid="panel-sheet-formulas">
+          <SectionTitle icon={Sigma} tone="pink">Formules et règles à connaître</SectionTitle>
+          <div className="grid gap-3 md:grid-cols-2">
+            {sheet.formulas!.map((f, i) => (
+              <div key={i} className="min-w-0 rounded-xl border border-border bg-background p-3.5">
+                <p className="text-xs font-medium text-muted-foreground">{f.label}</p>
+                <p className="mt-1 break-anywhere font-mono text-sm font-semibold">{f.expression}</p>
+                {f.meaning && <p className="mt-1.5 text-xs leading-5 text-muted-foreground">{f.meaning}</p>}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      <MethodsPanel title="Fiches méthode" methods={sheet.methods} />
+      <TablesPanel title="Tableaux de synthèse" tables={sheet.tables} />
 
       {sheet.flashcards.length > 0 && <Flashcards cards={sheet.flashcards} />}
 
@@ -601,7 +657,7 @@ export function ExercisesView({ exercises }: { exercises: Exercises }) {
 }
 
 // ---------------- EXAMEN ----------------
-export function ExamView({ exam, courseId }: { exam: Exam; courseId: number }) {
+export function ExamView({ exam, courseId, setId }: { exam: Exam; courseId: number; setId?: number }) {
   const [phase, setPhase] = useState<"intro" | "running" | "grading" | "done">("intro");
   const [answers, setAnswers] = useState<Record<string, any>>({});
   const [left, setLeft] = useState(exam.duration_minutes * 60);
@@ -621,7 +677,7 @@ export function ExamView({ exam, courseId }: { exam: Exam; courseId: number }) {
     setPhase("grading");
     setError(null);
     try {
-      const res = await apiRequest("POST", `/api/courses/${courseId}/exam/grade`, { answers });
+      const res = await apiRequest("POST", `/api/courses/${courseId}/exam/grade`, { answers, setId });
       setGrade(await res.json());
       setPhase("done");
     } catch (e: any) {

@@ -1,4 +1,4 @@
-import type { User, CourseRow, Course, CourseSummary, CourseSession, Subject, Attachment } from "@shared/schema";
+import type { User, CourseRow, Course, CourseSummary, CourseSession, Subject, Attachment, StudySet, Exercises, Exam } from "@shared/schema";
 import { q, one, pool } from "./db";
 
 const COURSE_COLS = `
@@ -39,7 +39,7 @@ function base(row: CourseRow, viewerId: number) {
 }
 
 export async function toCourse(row: CourseRow, viewerId: number): Promise<Course> {
-  const [sessions, siblings, attachments] = await Promise.all([
+  const [sessions, siblings, attachments, sets] = await Promise.all([
     storage.listCourseSessions(row.id),
     row.subjectId
       ? q(
@@ -49,7 +49,10 @@ export async function toCourse(row: CourseRow, viewerId: number): Promise<Course
         )
       : Promise.resolve([]),
     storage.listAttachments(row.id),
+    storage.listSets(row.id, viewerId),
   ]);
+  const exerciseSets = sets.filter((x) => x.kind === "exercises").map(({ kind, ...x }) => x) as StudySet<Exercises>[];
+  const examSets = sets.filter((x) => x.kind === "exam").map(({ kind, ...x }) => x) as StudySet<Exam>[];
   return {
     ...base(row, viewerId),
     transcript: row.transcript,
@@ -57,8 +60,10 @@ export async function toCourse(row: CourseRow, viewerId: number): Promise<Course
     siblings,
     notes: row.notes ?? null,
     sheet: row.sheet ?? null,
-    exercises: row.exercises ?? null,
-    exam: row.exam ?? null,
+    exercises: exerciseSets.at(-1)?.data ?? row.exercises ?? null,
+    exam: examSets.at(-1)?.data ?? row.exam ?? null,
+    exerciseSets,
+    examSets,
     classExercises: row.classExercises ?? null,
     attachments,
   };
@@ -102,6 +107,50 @@ const JSON_COLS = new Set(["notes", "sheet", "exercises", "exam", "classExercise
 const ATT_COLS = `id, exercise_no as "exerciseNo", kind, mime, label, extracted, uploaded, created_at as "createdAt"`;
 
 export const storage = {
+  // ----- Séries d'exercices et examens blancs (une nouvelle série à chaque génération) -----
+  async listSets(courseId: number, viewerId: number): Promise<(StudySet<any> & { kind: string })[]> {
+    return q(
+      `select cs.id, cs.n, cs.kind, cs.author_id as "authorId", coalesce(u.name, 'Ancien utilisateur') as "authorName",
+              (cs.author_id = $2) as "isMine", cs.created_at as "createdAt", cs.data
+         from public.course_sets cs left join public.users u on u.id = cs.author_id
+        where cs.course_id = $1 order by cs.kind, cs.n`,
+      [courseId, viewerId],
+    );
+  },
+  async getSet(courseId: number, id: number) {
+    return one<{ id: number; kind: string; n: number; authorId: number | null; data: any }>(
+      `select id, kind, n, author_id as "authorId", data from public.course_sets where course_id = $1 and id = $2`,
+      [courseId, id],
+    );
+  },
+  async createSet(courseId: number, kind: "exercises" | "exam", authorId: number, data: unknown) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const r = await one<{ id: number; n: number }>(
+          `insert into public.course_sets (course_id, kind, n, author_id, data, created_at)
+           select $1, $2, coalesce(max(n), 0) + 1, $3, $4::jsonb, $5 from public.course_sets where course_id = $1 and kind = $2
+           returning id, n`,
+          [courseId, kind, authorId, JSON.stringify(data), Date.now()],
+        );
+        await q(`update public.courses set ${kind === "exam" ? "exam" : "exercises"} = $2::jsonb where id = $1`, [courseId, JSON.stringify(data)]);
+        return r!;
+      } catch (e: any) {
+        if (e?.code !== "23505" || attempt === 2) throw e;
+      }
+    }
+    throw new Error("unreachable");
+  },
+  async deleteSet(courseId: number, id: number) {
+    const r = await one<{ kind: string }>(`delete from public.course_sets where course_id = $1 and id = $2 returning kind`, [courseId, id]);
+    if (!r) return false;
+    const col = r.kind === "exam" ? "exam" : "exercises";
+    await q(
+      `update public.courses set ${col} = (select data from public.course_sets where course_id = $1 and kind = $2 order by n desc limit 1) where id = $1`,
+      [courseId, r.kind],
+    );
+    return true;
+  },
+
   // ----- Énoncés joints (photos, PDF) -----
   async listAttachments(courseId: number): Promise<Attachment[]> {
     return q(`select ${ATT_COLS} from public.course_attachments where course_id = $1 and uploaded order by exercise_no nulls last, created_at`, [courseId]);

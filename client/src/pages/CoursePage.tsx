@@ -27,7 +27,7 @@ import {
   Wand2,
   PenLine,
 } from "lucide-react";
-import type { Course } from "@shared/schema";
+import type { Course, StudySet } from "@shared/schema";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
@@ -81,13 +81,13 @@ const GEN_INFO: Record<Kind, { title: string; text: string; cta: string }> = {
   },
   exercises: {
     title: "Exercices corrigés",
-    text: "Une douzaine d'exercices progressifs : QCM, vrai/faux, questions ouvertes et cas d'application, avec corrigés détaillés.",
-    cta: "Générer les exercices",
+    text: "15 exercices progressifs sur le thème du cours : QCM, vrai/faux, questions de cours, applications et 4 cas pratiques chiffrés, avec corrigés détaillés vérifiés. Chaque nouvelle série propose des cas différents.",
+    cta: "Générer une série d'exercices",
   },
   exam: {
     title: "Examen blanc noté sur 20",
-    text: "Un sujet chronométré, avec QCM corrigés automatiquement et questions rédigées corrigées par l'IA selon un barème.",
-    cta: "Générer l'examen",
+    text: "Un sujet complet d'au moins 14 questions : QCM, questions de cours et cas pratiques sur le thème du cours, corrigés selon un barème. Chaque nouvel examen est différent du précédent.",
+    cta: "Générer un examen blanc",
   },
 };
 
@@ -102,6 +102,9 @@ export default function CoursePage({ id, publicView }: { id: number; publicView?
   const [savingText, setSavingText] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const autoRan = useRef(false);
+  // Série affichée pour les exercices et les examens (null = la plus récente).
+  const [picked, setPicked] = useState<{ exercises: number | null; exam: number | null }>({ exercises: null, exam: null });
+  const [confirmSet, setConfirmSet] = useState<StudySet<unknown> | null>(null);
 
   const owner = !!course?.isOwner && !publicView;
 
@@ -112,6 +115,7 @@ export default function CoursePage({ id, publicView }: { id: number; publicView?
       const res = await apiRequest("POST", `/api/courses/${id}/generate/${kind}`);
       const updated: Course = await res.json();
       queryClient.setQueryData(["/api/courses", id], updated);
+      if (kind === "exercises" || kind === "exam") setPicked((p) => ({ ...p, [kind]: null }));
       queryClient.invalidateQueries({ queryKey: ["/api/courses"], exact: true });
       queryClient.invalidateQueries({ queryKey: ["/api/library"] });
     } catch (e: any) {
@@ -215,6 +219,81 @@ export default function CoursePage({ id, publicView }: { id: number; publicView?
   const words = course.transcript.trim() ? course.transcript.trim().split(/\s+/).length : 0;
   const anyPending = pending.size > 0;
   const missing = (["notes", "class", "sheet", "exercises", "exam"] as Kind[]).filter((k) => !contentOf(course, k));
+  const setsOf = (k: "exercises" | "exam"): StudySet<any>[] => (k === "exam" ? course.examSets : course.exerciseSets) || [];
+  const currentSet = (k: "exercises" | "exam") => {
+    const sets = setsOf(k);
+    return sets.find((x) => x.id === picked[k]) ?? sets.at(-1) ?? null;
+  };
+  const canGenerate = (k: Kind) => owner || k === "exercises" || k === "exam";
+
+  async function deleteSet(set: StudySet<unknown>) {
+    try {
+      const res = await apiRequest("DELETE", `/api/courses/${id}/sets/${set.id}`);
+      queryClient.setQueryData(["/api/courses", id], await res.json());
+      setPicked({ exercises: null, exam: null });
+      toast({ title: "Série supprimée" });
+    } catch (e: any) {
+      toast({ title: "Suppression impossible", description: e.message, variant: "destructive" });
+    }
+  }
+
+  function SetBar({ k }: { k: "exercises" | "exam" }) {
+    const sets = setsOf(k);
+    const cur = currentSet(k);
+    const label = k === "exam" ? "Examen" : "Série";
+    const busy = pending.has(k);
+    return (
+      <div className="no-print mb-4 rounded-2xl border border-card-border bg-card p-3" data-testid={`setbar-${k}`}>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <p className="text-xs font-medium text-muted-foreground">
+            {sets.length} {k === "exam" ? (sets.length > 1 ? "examens blancs" : "examen blanc") : sets.length > 1 ? "séries d'exercices" : "série d'exercices"} sur ce cours
+          </p>
+          <div className="flex items-center gap-1">
+            {cur && (cur.isMine || owner) && (
+              <Button variant="ghost" size="sm" onClick={() => setConfirmSet(cur)} aria-label={`Supprimer ${label} ${cur.n}`} data-testid={`button-delete-set-${k}`}>
+                <Trash2 className="h-3.5 w-3.5" />
+              </Button>
+            )}
+            {words >= 40 && (
+              <Button size="sm" variant="secondary" onClick={() => generate(k)} disabled={busy} data-testid={`button-new-set-${k}`}>
+                {busy ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Sparkles className="mr-1.5 h-3.5 w-3.5" />}
+                {k === "exam" ? "Nouvel examen" : "Nouvelle série"}
+              </Button>
+            )}
+          </div>
+        </div>
+        {sets.length > 1 && (
+          <div className="mt-2.5 flex gap-1.5 overflow-x-auto pb-0.5">
+            {sets.map((x) => (
+              <button
+                key={x.id}
+                type="button"
+                onClick={() => setPicked((p) => ({ ...p, [k]: x.id }))}
+                className={cn(
+                  "shrink-0 rounded-full border px-3 py-1 text-xs transition-colors",
+                  cur?.id === x.id ? "border-primary bg-primary text-primary-foreground" : "border-border bg-background text-foreground/80 hover:border-primary/50",
+                )}
+                title={`${x.isMine ? "Toi" : x.authorName} · ${formatDate(x.createdAt)}`}
+                data-testid={`chip-set-${k}-${x.n}`}
+              >
+                {label} {x.n} · {x.isMine ? "toi" : x.authorName.split(" ")[0]}
+              </button>
+            ))}
+          </div>
+        )}
+        {busy && (
+          <p className="mt-2.5 flex items-center gap-2 text-xs text-muted-foreground" data-testid={`status-generating-${k}`}>
+            <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" /> Nouvelle {k === "exam" ? "copie d'examen" : "série"} en préparation : génération puis vérification de chaque corrigé (1 à 3 minutes).
+          </p>
+        )}
+        {genError[k] && (
+          <p role="alert" className="mt-2.5 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+            {genError[k]}
+          </p>
+        )}
+      </div>
+    );
+  }
 
   function renderTab() {
     if (!course) return null;
@@ -260,14 +339,17 @@ export default function CoursePage({ id, publicView }: { id: number; publicView?
         />
       );
     const content = contentOf(course, kind);
-    const isPending = pending.has(kind) || (kind !== "notes" && pending.has("notes") && !course.notes);
+    const isSetKind = kind === "exercises" || kind === "exam";
+    const isPending = (pending.has(kind) && !(isSetKind && content)) || (owner && kind !== "notes" && pending.has("notes") && !course.notes);
     if (isPending)
       return (
         <div className="flex flex-col items-center rounded-2xl border border-card-border bg-card px-6 py-16 text-center" data-testid={`status-generating-${kind}`}>
           <Loader2 className="h-8 w-8 animate-spin text-primary" />
           <p className="mt-4 text-base font-semibold">{GEN_INFO[kind].title} en cours…</p>
           <p className="mt-1 max-w-sm text-sm text-muted-foreground">
-            L'IA lit tout le cours. Cela prend généralement entre 20 secondes et 1 minute selon sa longueur.
+            {isSetKind
+              ? "L'IA lit tout le cours, crée les exercices puis vérifie chaque corrigé. Cela prend 1 à 3 minutes."
+              : "L'IA lit tout le cours. Cela prend généralement entre 20 secondes et 1 minute selon sa longueur."}
           </p>
         </div>
       );
@@ -284,10 +366,10 @@ export default function CoursePage({ id, publicView }: { id: number; publicView?
               {genError[kind]}
             </p>
           )}
-          {owner ? (
+          {canGenerate(kind) ? (
             words < 40 ? (
               <p className="mt-5 text-sm text-muted-foreground">
-                La transcription contient {words} mots : il en faut au moins 40. Complète-la dans l'onglet Transcription.
+                La transcription contient {words} mots : il en faut au moins 40.{owner ? " Complète-la dans l'onglet Transcription." : ""}
               </p>
             ) : (
               <Button className="mt-6" onClick={() => generate(kind)} data-testid={`button-generate-${kind}`}>
@@ -302,7 +384,8 @@ export default function CoursePage({ id, publicView }: { id: number; publicView?
 
     return (
       <div>
-        {owner && (
+        {isSetKind && SetBar({ k: kind })}
+        {owner && !isSetKind && (
           <div className="no-print mb-4 flex justify-end">
             <Button variant="ghost" size="sm" onClick={() => generate(kind)} data-testid={`button-regenerate-${kind}`}>
               <RefreshCw className="mr-1.5 h-3.5 w-3.5" /> Régénérer
@@ -311,8 +394,10 @@ export default function CoursePage({ id, publicView }: { id: number; publicView?
         )}
         {kind === "notes" && course.notes && <NotesView notes={course.notes} />}
         {kind === "sheet" && course.sheet && <SheetView sheet={course.sheet} />}
-        {kind === "exercises" && course.exercises && <ExercisesView exercises={course.exercises} />}
-        {kind === "exam" && course.exam && <ExamView key={JSON.stringify(course.exam).length} exam={course.exam} courseId={course.id} />}
+        {kind === "exercises" && currentSet("exercises") && <ExercisesView key={currentSet("exercises")!.id} exercises={currentSet("exercises")!.data} />}
+        {kind === "exercises" && !currentSet("exercises") && course.exercises && <ExercisesView exercises={course.exercises} />}
+        {kind === "exam" && currentSet("exam") && <ExamView key={currentSet("exam")!.id} exam={currentSet("exam")!.data} courseId={course.id} setId={currentSet("exam")!.id} />}
+        {kind === "exam" && !currentSet("exam") && course.exam && <ExamView exam={course.exam} courseId={course.id} />}
       </div>
     );
   }
@@ -376,7 +461,7 @@ export default function CoursePage({ id, publicView }: { id: number; publicView?
               </Link>
             </Button>
           )}
-          <ExportDialog course={course} />
+          <ExportDialog course={course} exSet={currentSet("exercises")?.id} examSet={currentSet("exam")?.id} />
           {owner && (
             <>
             <Button
@@ -562,6 +647,28 @@ export default function CoursePage({ id, publicView }: { id: number; publicView?
           <AlertDialogFooter>
             <AlertDialogCancel data-testid="button-cancel-delete">Annuler</AlertDialogCancel>
             <AlertDialogAction onClick={remove} className="bg-[#8A0D1E] hover:bg-[#740b19]" data-testid="button-confirm-delete">
+              Supprimer
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={!!confirmSet} onOpenChange={(o) => !o && setConfirmSet(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Supprimer cette série ?</AlertDialogTitle>
+            <AlertDialogDescription>Elle disparaîtra pour toutes les personnes qui consultent ce cours. Les autres séries sont conservées.</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Annuler</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                if (confirmSet) deleteSet(confirmSet);
+                setConfirmSet(null);
+              }}
+              className="bg-[#8A0D1E] hover:bg-[#740b19]"
+              data-testid="button-confirm-delete-set"
+            >
               Supprimer
             </AlertDialogAction>
           </AlertDialogFooter>

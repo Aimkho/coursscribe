@@ -51,7 +51,7 @@ async function generate(
     // Gemini 2.5 : budget en tokens ; Gemini 3 et suivants : niveau de réflexion.
     body.generationConfig.thinkingConfig = /2\.5/.test(model)
       ? { thinkingBudget: opts.thinking }
-      : { thinkingLevel: opts.thinking === 0 ? "minimal" : "low" };
+      : { thinkingLevel: opts.thinking === 0 ? "minimal" : opts.thinking >= 8000 ? "high" : opts.thinking >= 4000 ? "medium" : "low" };
   }
   if (opts.system) body.systemInstruction = { parts: [{ text: opts.system }] };
 
@@ -110,18 +110,19 @@ function extractJson(text: string): any {
 }
 
 /** Génération structurée (JSON) avec un nouvel essai en cas d'échec ponctuel. */
-export async function generateJson(system: string, user: string, maxTokens: number, meta: { userId?: number | null; kind: string }) {
+export async function generateJson(system: string, user: string, maxTokens: number, meta: { userId?: number | null; kind: string; thinking?: number; temperature?: number; attempts?: number; timeoutMs?: number }) {
   const model = TEXT_MODEL();
   let lastErr: unknown;
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; attempt < (meta.attempts ?? 2); attempt++) {
     try {
       const { text, usage } = await generate(model, {
         system,
         parts: [{ text: user }],
         maxTokens: Math.max(maxTokens, 8192) + 4096,
         json: true,
-        thinking: 2048,
-        temperature: 0.5,
+        thinking: meta.thinking ?? 2048,
+        timeoutMs: meta.timeoutMs ?? 120_000,
+        temperature: meta.temperature ?? 0.5,
       });
       void logUsage(meta.userId ?? null, meta.kind, model, usage);
       return extractJson(text);

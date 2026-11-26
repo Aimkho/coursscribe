@@ -77,6 +77,12 @@ export type Notes = {
   formulas: { label: string; expression: string; meaning: string }[];
   student_questions: { question: string; answer: string }[];
   to_verify: string[];
+  /** Discipline identifiée (ex. « Finance — tableau des flux de trésorerie »). */
+  discipline?: string;
+  /** Méthodes et démarches pas à pas (calcul, raisonnement, rédaction). */
+  methods?: { title: string; when: string; steps: string[] }[];
+  /** Tableaux et schémas du cours (structure d'un état financier, chronologie, comparaison…). */
+  tables?: DataTable[];
 };
 export type Sheet = {
   essentials: string[];
@@ -85,6 +91,12 @@ export type Sheet = {
   common_mistakes: string[];
   flashcards: { front: string; back: string }[];
   checklist: string[];
+  /** Formules et règles à connaître par cœur. */
+  formulas?: { label: string; expression: string; meaning: string }[];
+  /** Fiches méthode : démarche à appliquer le jour de l'examen. */
+  methods?: { title: string; when: string; steps: string[] }[];
+  /** Tableaux de synthèse (comparaisons, structure type, chronologie). */
+  tables?: DataTable[];
 };
 /** Tableau de données (bilan, compte de résultat, relevé de mesures, tableau de variations…). */
 export type DataTable = { title: string; headers: string[]; rows: string[][] };
@@ -160,6 +172,9 @@ export type ClassExercise = {
 };
 export type ClassExercises = { items: ClassExercise[] };
 
+/** Série d'exercices ou examen blanc : chaque génération ajoute une nouvelle série (Série 1, Série 2…). */
+export type StudySet<T> = { id: number; n: number; authorId: number | null; authorName: string; isMine: boolean; createdAt: number; data: T };
+
 export type Course = {
   id: number;
   ownerId: number;
@@ -186,10 +201,12 @@ export type Course = {
   sheet: Sheet | null;
   exercises: Exercises | null;
   exam: Exam | null;
+  exerciseSets: StudySet<Exercises>[];
+  examSets: StudySet<Exam>[];
   classExercises: ClassExercises | null;
   attachments: Attachment[];
 };
-export type CourseSummary = Omit<Course, "transcript" | "notes" | "sheet" | "exercises" | "exam" | "sessions" | "siblings" | "classExercises" | "attachments"> & {
+export type CourseSummary = Omit<Course, "transcript" | "notes" | "sheet" | "exercises" | "exam" | "exerciseSets" | "examSets" | "sessions" | "siblings" | "classExercises" | "attachments"> & {
   summary: string;
   wordCount: number;
   hasNotes: boolean;

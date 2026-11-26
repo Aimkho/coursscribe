@@ -26,6 +26,12 @@ const TYPE: Record<string, string> = { qcm: "QCM", vrai_faux: "Vrai ou faux", ou
 
 const clean = (s: unknown) => (typeof s === "string" ? s.trim() : "");
 const list = (a: unknown): string[] => (Array.isArray(a) ? a.map(clean).filter(Boolean) : []);
+const methods = (ms: unknown): Block[] =>
+  (Array.isArray(ms) ? ms : []).flatMap((m: any) => [
+    { t: "h3" as const, text: clean(m?.title) },
+    ...(clean(m?.when) ? [{ t: "p" as const, text: `Quand l'utiliser : ${clean(m.when)}`, muted: true }] : []),
+    { t: "numbered" as const, items: list(m?.steps) },
+  ]);
 const tables = (ts: unknown, tone: "violet" | "dark" = "violet"): Block[] =>
   (Array.isArray(ts) ? ts : [])
     .filter((t: any) => Array.isArray(t?.rows) && t.rows.length)
@@ -67,6 +73,14 @@ export function buildBlocks(c: Course, parts: ExportPart[], withAnswers = true):
       out.push({ t: "h2", text: "Formules" });
       n.formulas.forEach((f) => out.push({ t: "formula", label: clean(f.label), expr: clean(f.expression), meaning: clean(f.meaning) }));
     }
+    if (n.methods?.length) {
+      out.push({ t: "h2", text: "Méthodes" });
+      out.push(...methods(n.methods));
+    }
+    if (n.tables?.length) {
+      out.push({ t: "h2", text: "Tableaux du cours" });
+      out.push(...tables(n.tables));
+    }
     if (n.examples?.length) {
       out.push({ t: "h2", text: "Exemples" });
       n.examples.forEach((e) => out.push({ t: "def", term: clean(e.title), text: clean(e.explanation) }));
@@ -85,6 +99,18 @@ export function buildBlocks(c: Course, parts: ExportPart[], withAnswers = true):
     if (list(s.essentials).length) {
       out.push({ t: "h2", text: "L'essentiel à savoir" });
       out.push({ t: "numbered", items: list(s.essentials) });
+    }
+    if (s.formulas?.length) {
+      out.push({ t: "h2", text: "Formules et règles à connaître" });
+      s.formulas.forEach((f) => out.push({ t: "formula", label: clean(f.label), expr: clean(f.expression), meaning: clean(f.meaning) }));
+    }
+    if (s.methods?.length) {
+      out.push({ t: "h2", text: "Fiches méthode" });
+      out.push(...methods(s.methods));
+    }
+    if (s.tables?.length) {
+      out.push({ t: "h2", text: "Tableaux de synthèse" });
+      out.push(...tables(s.tables));
     }
     if (s.concept_links?.length) {
       out.push({ t: "h2", text: "Liens entre les notions" });

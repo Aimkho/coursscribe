@@ -25,7 +25,7 @@ const PARTS: { id: Part; label: string }[] = [
   { id: "exam", label: "Examen blanc" },
 ];
 
-export function ExportDialog({ course }: { course: Course }) {
+export function ExportDialog({ course, exSet, examSet }: { course: Course; exSet?: number; examSet?: number }) {
   const { toast } = useToast();
   const [open, setOpen] = useState(false);
   const [format, setFormat] = useState<Format>("pdf");
@@ -47,7 +47,7 @@ export function ExportDialog({ course }: { course: Course }) {
     setBusy(true);
     try {
       const f = FORMATS.find((x) => x.id === format)!;
-      const q = format === "pptx" ? "" : `?parts=${chosen.join(",")}&answers=${answers ? 1 : 0}`;
+      const q = format === "pptx" ? "" : `?parts=${chosen.join(",")}&answers=${answers ? 1 : 0}${exSet ? `&exSet=${exSet}` : ""}${examSet ? `&examSet=${examSet}` : ""}`;
       await apiDownload(`/api/courses/${course.id}/export/${format}${q}`, `cours.${f.ext}`);
       toast({ title: `${f.label} prêt`, description: "Le téléchargement a démarré." });
       setOpen(false);

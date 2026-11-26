@@ -15,7 +15,7 @@ import { renderPdf } from "./export/pdf";
 import { renderDocx } from "./export/docx";
 import { renderPptx } from "./export/pptx";
 import { billingState, quotaError, verifyStripeSignature, handleStripeEvent, checkoutUrl, portalUrl, PLANS, invalidateBilling } from "./billing";
-import { generateNotes, generateSheet, generateExercises, generateExam, gradeOpenAnswers, generateClassExercises, classExercisesBrief } from "./ai";
+import { generateNotes, generateSheet, generateExercises, generateExam, gradeOpenAnswers, generateClassExercises, classExercisesBrief, verifyStudySet } from "./ai";
 
 /** Version du texte de consentement : l'incrémenter redemande l'accord à tous les utilisateurs. */
 export const CONSENT_VERSION = 1;
@@ -98,6 +98,11 @@ function zodMessage(err: any) {
 const arr = (v: any) => (Array.isArray(v) ? v : []);
 const str = (v: any) => (typeof v === "string" ? v : v == null ? "" : String(v));
 
+function normalizeMethods(v: any) {
+  return arr(v)
+    .map((m: any) => ({ title: str(m?.title), when: str(m?.when), steps: arr(m?.steps).map(str).filter(Boolean) }))
+    .filter((m: any) => m.title && m.steps.length);
+}
 function normalizeNotes(n: any) {
   return {
     title: str(n.title),
@@ -108,6 +113,9 @@ function normalizeNotes(n: any) {
     definitions: arr(n.definitions).map((d: any) => ({ term: str(d.term), definition: str(d.definition) })),
     examples: arr(n.examples).map((d: any) => ({ title: str(d.title), explanation: str(d.explanation) })),
     formulas: arr(n.formulas).map((d: any) => ({ label: str(d.label), expression: str(d.expression), meaning: str(d.meaning) })),
+    discipline: str(n.discipline),
+    methods: normalizeMethods(n.methods),
+    tables: normalizeTables(n.tables, 8),
     student_questions: arr(n.student_questions).map((d: any) => ({ question: str(d.question), answer: str(d.answer) })),
     to_verify: arr(n.to_verify).map(str),
   };
@@ -120,11 +128,14 @@ function normalizeSheet(s: any) {
     common_mistakes: arr(s.common_mistakes).map(str),
     flashcards: arr(s.flashcards).map((f: any) => ({ front: str(f.front), back: str(f.back) })),
     checklist: arr(s.checklist).map(str),
+    formulas: arr(s.formulas).map((d: any) => ({ label: str(d.label), expression: str(d.expression), meaning: str(d.meaning) })).filter((d: any) => d.label || d.expression),
+    methods: normalizeMethods(s.methods),
+    tables: normalizeTables(s.tables, 6),
   };
 }
 const TYPES = ["qcm", "vrai_faux", "ouverte", "application", "cas_pratique"];
 const DIFFS = ["facile", "moyen", "difficile"];
-function normalizeTables(v: any) {
+function normalizeTables(v: any, max = 4) {
   return arr(v)
     .map((t: any) => {
       const headers = arr(t?.headers).map(str);
@@ -134,7 +145,7 @@ function normalizeTables(v: any) {
       return { title: str(t?.title), headers: headers.length ? pad(headers) : [], rows: arr(t?.rows).map((r: any) => pad(arr(r).map(str))).filter((r: string[]) => r.some(Boolean)).slice(0, 40) };
     })
     .filter((t: any) => t && t.rows.length)
-    .slice(0, 4);
+    .slice(0, max);
 }
 function normalizeExercises(e: any) {
   return {
@@ -177,9 +188,45 @@ function normalizeExam(x: any): Exam {
           tables: normalizeTables(q.tables),
           answer_tables: normalizeTables(q.answer_tables),
         }))
-        .filter((q: any) => q.question),
-    })),
+        .filter((q: any) => q.question && (q.type !== "qcm" || (q.options?.length >= 2 && q.answer_index !== undefined))),
+    })).filter((s: any) => s.questions.length),
   } as Exam;
+}
+
+/** Résumé d'une série déjà générée, transmis à l'IA pour qu'elle produise une série différente. */
+function previousBrief(kind: string, data: any): string {
+  const items: any[] = kind === "exam" ? arr(data?.sections).flatMap((s: any) => arr(s.questions)) : arr(data?.items);
+  return items
+    .filter((i) => i.type !== "qcm" && i.type !== "vrai_faux")
+    .map((i) => `[${i.type}] ${str(i.question).replace(/\s+/g, " ").slice(0, 260)}`)
+    .join("\n")
+    .slice(0, 3500);
+}
+
+const FIX_FIELDS = ["question", "options", "answer_index", "answer_bool", "model_answer", "explanation", "tables", "answer_tables", "grading_criteria"];
+async function verifyAndFix(kind: "exercises" | "exam", meta: { title: string; subject: string; level: string }, notes: unknown, data: any, userId: number) {
+  const items: any[] = kind === "exam" ? data.sections.flatMap((s: any) => s.questions) : data.items;
+  try {
+    const out = await verifyStudySet(kind, meta, notes, items, userId);
+    let applied = 0;
+    for (const f of arr(out?.fixes)) {
+      const it = items[Number(f?.index)];
+      if (!it) continue;
+      for (const k of FIX_FIELDS) {
+        if (f[k] === undefined || f[k] === null) continue;
+        if (k === "tables" || k === "answer_tables") it[k] = normalizeTables(f[k]);
+        else if (k === "options" || k === "grading_criteria") it[k] = arr(f[k]).map(str);
+        else if (k === "answer_index") { if (typeof f[k] === "number" && f[k] >= 0 && f[k] < (it.options?.length ?? 0)) it[k] = f[k]; }
+        else if (k === "answer_bool") { if (typeof f[k] === "boolean") it[k] = f[k]; }
+        else if (str(f[k]).trim()) it[k] = str(f[k]);
+      }
+      applied++;
+    }
+    console.log(`verify ${kind}: ${arr(out?.checks).length} vérifiés, ${applied} correction(s) ${arr(out?.fixes).map((f: any) => `[${f.index}] ${str(f.problem).slice(0, 160)}`).join(" | ")}`);
+  } catch (e: any) {
+    logErr(`verify ${kind} ${e?.status ?? ""} ${e?.message}`);
+  }
+  return data;
 }
 
 const STATEMENT_SOURCES = ["photo", "transcription", "photo_et_transcription"];
@@ -558,6 +605,9 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     const row = await viewable(req, res);
     if (!row) return;
     const course = await toCourse(row, req.user!.id);
+    const pick = <T,>(sets: { id: number; data: T }[], q: unknown) => sets.find((x) => x.id === Number(q))?.data;
+    course.exercises = pick(course.exerciseSets, req.query.exSet) ?? course.exercises;
+    course.exam = pick(course.examSets, req.query.examSet) ?? course.exam;
     const format = String(req.params.format);
     const requested = String(req.query.parts || ALL_PARTS.join(","))
       .split(",")
@@ -674,18 +724,26 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   }));
 
   // ---------- Génération IA ----------
+  /**
+   * Génération IA.
+   * - notes, fiche, exercices du cours : réservés à l'auteur du cours.
+   * - exercices et examens blancs : tout utilisateur qui peut consulter le cours (bibliothèque comprise).
+   *   Chaque génération ajoute une nouvelle série (Série 1, Série 2…) visible par tous, sans modifier le cours.
+   */
   app.post("/api/courses/:id/generate/:kind", auth, requireConsent, h(async (req: AuthedRequest, res) => {
     const kind = String(req.params.kind);
     if (!["notes", "sheet", "exercises", "exam", "class"].includes(kind)) return res.status(400).json({ message: "Type inconnu." });
+    const isSet = kind === "exercises" || kind === "exam";
     const row = await storage.getCourse(Number(req.params.id));
-    if (!row || row.ownerId !== req.user!.id) return res.status(404).json({ message: "Cours introuvable." });
+    const isOwner = !!row && row.ownerId === req.user!.id;
+    if (!row || (!isOwner && !(isSet && row.isPublic))) return res.status(404).json({ message: "Cours introuvable." });
     const words = row.transcript.trim().split(/\s+/).filter(Boolean).length;
     const atts = kind === "class" ? (await storage.listAttachments(row.id)).filter((a) => a.extracted) : [];
     if (words < 40 && !atts.length)
       return res.status(400).json({ message: `La transcription est trop courte (${words} mots). Il faut au moins 40 mots pour une analyse fiable.` });
     const quota = await quotaError(req.user!, "gen");
     if (quota) return res.status(402).json(quota);
-    const key = `${row.id}:${kind}`;
+    const key = isSet ? `${row.id}:${kind}:${req.user!.id}` : `${row.id}:${kind}`;
     if (running.has(key)) return res.status(409).json({ message: "Une génération est déjà en cours pour ce contenu." });
     running.add(key);
     const meta = { title: row.title, subject: row.subject, level: row.level };
@@ -704,14 +762,29 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       } else if (kind === "notes" || !notes) {
         // Notes créées en préalable d'un autre contenu : non décomptées du quota (kind « notes_auto »).
         notes = normalizeNotes(await generateNotes(meta, row.transcript, req.user!.id, kind === "notes" ? "notes" : "notes_auto"));
-        patch.notes = notes;
-        patch.analyzedAt = started;
+        // Un lecteur de la bibliothèque ne modifie jamais le cours : ses notes servent seulement à cette génération.
+        if (isOwner) {
+          patch.notes = notes;
+          patch.analyzedAt = started;
+        }
       }
       if (kind === "sheet") patch.sheet = normalizeSheet(await generateSheet(meta, row.transcript, notes, req.user!.id));
-      const brief = classExercisesBrief(row.classExercises);
-      if (kind === "exercises") patch.exercises = normalizeExercises(await generateExercises(meta, row.transcript, notes, req.user!.id, brief));
-      if (kind === "exam") patch.exam = normalizeExam(await generateExam(meta, row.transcript, notes, req.user!.id, brief));
-      const updated = (await storage.updateCourse(row.id, req.user!.id, patch))!;
+      if (isSet) {
+        const brief = classExercisesBrief(row.classExercises);
+        const existing = (await storage.listSets(row.id, req.user!.id)).filter((x) => x.kind === kind);
+        const n = (existing.at(-1)?.n ?? 0) + 1;
+        const previous = existing.slice(-4).map((x) => previousBrief(kind, x.data));
+        let data: any =
+          kind === "exercises"
+            ? normalizeExercises(await generateExercises(meta, row.transcript, notes, req.user!.id, brief, previous, n))
+            : normalizeExam(await generateExam(meta, row.transcript, notes, req.user!.id, brief, previous, n));
+        const count = kind === "exercises" ? data.items.length : data.sections.reduce((t: number, x: any) => t + x.questions.length, 0);
+        if (!count) throw new Error("série vide");
+        // Relecture indépendante des corrigés (calculs, réponses), si le temps le permet.
+        if (Date.now() - started < 150_000) data = await verifyAndFix(kind, meta, notes, data, req.user!.id);
+        await storage.createSet(row.id, kind, req.user!.id, data);
+      }
+      const updated = Object.keys(patch).length ? (await storage.updateCourse(row.id, row.ownerId, patch))! : (await storage.getCourse(row.id))!;
       invalidateBilling(req.user!.id);
       res.json(await toCourse(updated, req.user!.id));
     } catch (e: any) {
@@ -722,10 +795,23 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     }
   }));
 
+  // Suppression d'une série : par l'auteur du cours ou par l'auteur de la série.
+  app.delete("/api/courses/:id/sets/:sid", auth, h(async (req: AuthedRequest, res) => {
+    const row = await viewable(req, res);
+    if (!row) return;
+    const set = await storage.getSet(row.id, Number(req.params.sid));
+    if (!set) return res.json(await toCourse(row, req.user!.id));
+    if (row.ownerId !== req.user!.id && set.authorId !== req.user!.id) return res.status(403).json({ message: "Seul l'auteur de la série ou du cours peut la supprimer." });
+    await storage.deleteSet(row.id, set.id);
+    res.json(await toCourse((await storage.getCourse(row.id))!, req.user!.id));
+  }));
+
   app.post("/api/courses/:id/exam/grade", auth, requireConsent, h(async (req: AuthedRequest, res) => {
     const row = await viewable(req, res);
     if (!row) return;
-    const exam: Exam | null = row.exam ?? null;
+    const sid = Number(req.body?.setId);
+    const set = Number.isFinite(sid) && sid > 0 ? await storage.getSet(row.id, sid) : undefined;
+    const exam: Exam | null = set?.kind === "exam" ? (set.data as Exam) : row.exam ?? null;
     if (!exam) return res.status(400).json({ message: "Aucun examen pour ce cours." });
     const answers: Record<string, any> = req.body?.answers || {};
     const all = exam.sections.flatMap((s) => s.questions);
