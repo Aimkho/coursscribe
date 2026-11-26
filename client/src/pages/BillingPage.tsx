@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useLocation } from "wouter";
-import { Check, Crown, ExternalLink, Infinity as InfinityIcon, Loader2, Mic, Sparkles, Wand2 } from "lucide-react";
+import { CalendarClock, Check, Crown, ExternalLink, Infinity as InfinityIcon, Loader2, Mic, Repeat, Sparkles, Wand2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { queryClient } from "@/lib/queryClient";
 import { cn } from "@/lib/utils";
@@ -26,6 +26,8 @@ export type Billing = {
   window: { start: number; end: number };
   usage: { audioSec: number; gens: number };
   limits: { audioSec: number; gens: number } | null;
+  base: { audioSec: number; gens: number } | null;
+  carry: { audioSec: number; gens: number };
   plans: Record<PlanId, { label: string; price: string; audioSec: number; gens: number; window: string }>;
   checkout: Record<"week" | "month" | "year", string>;
   portal: string;
@@ -37,7 +39,7 @@ const hours = (s: number) => {
   return h >= 10 ? `${Math.round(h)} h` : h >= 1 ? `${h.toFixed(1).replace(".", ",")} h` : `${Math.round(s / 60)} min`;
 };
 
-function Meter({ icon: Icon, label, used, max, fmt }: { icon: any; label: string; used: number; max: number; fmt: (n: number) => string }) {
+function Meter({ icon: Icon, label, used, max, carry, fmt }: { icon: any; label: string; used: number; max: number; carry: number; fmt: (n: number) => string }) {
   const pct = Math.min(100, Math.round((used / Math.max(1, max)) * 100));
   return (
     <div>
@@ -52,6 +54,10 @@ function Meter({ icon: Icon, label, used, max, fmt }: { icon: any; label: string
       <div className="mt-2 h-2 overflow-hidden rounded-full bg-muted">
         <div className={cn("h-full rounded-full", pct >= 90 ? "bg-[#FE277E]" : "bg-primary")} style={{ width: `${pct}%` }} />
       </div>
+      <p className="mt-1.5 text-xs text-muted-foreground">
+        Il te reste <strong className="text-foreground">{fmt(Math.max(0, max - used))}</strong>
+        {carry > 0 && <> · dont {fmt(carry)} reporté{carry > 1 ? "s" : ""} de la période précédente</>}
+      </p>
     </div>
   );
 }
@@ -128,8 +134,8 @@ export default function BillingPage() {
                 : paid && data.periodEnd
                   ? data.cancelAtPeriodEnd
                     ? `Résilié : reste actif jusqu'au ${fmtDate(data.periodEnd)}.`
-                    : `Renouvellement le ${fmtDate(data.periodEnd)}.`
-                  : `Les compteurs repartent à zéro le ${fmtDate(data.window.end)}.`}
+                    : `Renouvellement le ${fmtDate(data.periodEnd)} : ce que tu n'as pas utilisé sera reporté.`
+                  : `Nouvelle période le ${fmtDate(data.window.end)} : ce que tu n'as pas utilisé sera reporté.`}
               {data.status === "past_due" && " Le dernier paiement a échoué : mets à jour ta carte."}
             </p>
           </div>
@@ -143,8 +149,8 @@ export default function BillingPage() {
         </div>
         {data.limits && (
           <div className="mt-6 grid gap-5 md:grid-cols-2">
-            <Meter icon={Mic} label="Transcription" used={data.usage.audioSec} max={data.limits.audioSec} fmt={hours} />
-            <Meter icon={Wand2} label="Générations IA" used={data.usage.gens} max={data.limits.gens} fmt={(n) => String(n)} />
+            <Meter icon={Mic} label="Transcription" used={data.usage.audioSec} max={data.limits.audioSec} carry={data.carry.audioSec} fmt={hours} />
+            <Meter icon={Wand2} label="Générations IA" used={data.usage.gens} max={data.limits.gens} carry={data.carry.gens} fmt={(n) => String(n)} />
           </div>
         )}
         {data.exempt && (
@@ -153,6 +159,8 @@ export default function BillingPage() {
           </p>
         )}
       </section>
+
+      {!data.exempt && <HowLimitsWork data={data} />}
 
       {!data.exempt && (
         <section>
@@ -184,6 +192,9 @@ export default function BillingPage() {
                       <Check className="mt-0.5 h-4 w-4 shrink-0 text-primary" /> {p.gens} générations IA {p.window}
                     </li>
                     <li className="flex gap-2">
+                      <Check className="mt-0.5 h-4 w-4 shrink-0 text-primary" /> Non utilisé : reporté sur la {o.id === "week" ? "semaine" : "période"} suivante
+                    </li>
+                    <li className="flex gap-2">
                       <Check className="mt-0.5 h-4 w-4 shrink-0 text-primary" /> Exercices faits en classe, cas pratiques, examens notés
                     </li>
                     <li className="flex gap-2">
@@ -212,7 +223,7 @@ export default function BillingPage() {
             })}
           </div>
           <p className="mt-4 text-xs leading-5 text-muted-foreground">
-            Prix TTC. Gratuit : {Math.round(data.plans.free.audioSec / 60)} min de transcription et {data.plans.free.gens} générations IA par mois. Les cours
+            Prix TTC. Gratuit : {Math.round(data.plans.free.audioSec / 60)} min de transcription et {data.plans.free.gens} générations IA par mois, avec le même report. Les cours
             publiés restent consultables par tous, même sans abonnement. Pour résilier, utilise « Gérer ou résilier » avec l'adresse e-mail de ton compte.
           </p>
           <button className="mt-2 text-xs font-medium text-primary underline-offset-2 hover:underline" onClick={() => navigate("/privacy")}>
@@ -221,6 +232,53 @@ export default function BillingPage() {
         </section>
       )}
     </div>
+  );
+}
+
+/** Explication des limites et du report du solde non utilisé. */
+function HowLimitsWork({ data }: { data: Billing }) {
+  const m = data.plans.month;
+  const h = Math.round(m.audioSec / 3600);
+  return (
+    <section className="rounded-2xl border border-card-border bg-card p-5 sm:p-6" data-testid="section-how-limits">
+      <h2 className="text-lg font-semibold">Comment fonctionnent tes limites</h2>
+      <div className="mt-4 grid gap-4 md:grid-cols-3">
+        <div className="rounded-xl bg-secondary/40 p-4">
+          <p className="flex items-center gap-2 text-sm font-semibold">
+            <Wand2 className="h-4 w-4 text-primary" /> Ce qui est compté
+          </p>
+          <p className="mt-2 text-sm leading-6 text-muted-foreground">
+            Le temps de cours transcrit, et chaque génération IA : notes, fiche de révision, série d'exercices, examen blanc ou correction des exercices faits en
+            classe. Une série d'exercices compte pour une seule génération, quel que soit le nombre de questions : QCM, questions de cours, applications et cas
+            pratiques avec tableaux. Relire, refaire un exercice, passer un examen ou exporter ne compte pas.
+          </p>
+        </div>
+        <div className="rounded-xl bg-secondary/40 p-4">
+          <p className="flex items-center gap-2 text-sm font-semibold">
+            <Repeat className="h-4 w-4 text-primary" /> Le non-utilisé est reporté
+          </p>
+          <p className="mt-2 text-sm leading-6 text-muted-foreground">
+            Ce que tu n'as pas utilisé pendant une période n'est pas perdu : il s'ajoute à la période suivante. Le report vaut pour la période qui suit
+            immédiatement et il est plafonné à un forfait. Au maximum, tu disposes donc du double de ton forfait sur une période.
+          </p>
+        </div>
+        <div className="rounded-xl bg-secondary/40 p-4">
+          <p className="flex items-center gap-2 text-sm font-semibold">
+            <CalendarClock className="h-4 w-4 text-primary" /> Exemple
+          </p>
+          <p className="mt-2 text-sm leading-6 text-muted-foreground">
+            Avec l'offre Mensuel ({h} h et {m.gens} générations), tu utilises 30 h et 40 générations en octobre. En novembre, tu disposes de {h} h + {h - 30} h ={" "}
+            {h + h - 30} h et de {m.gens} + {m.gens - 40} = {m.gens + m.gens - 40} générations. Ce qui reste de novembre passe ensuite sur décembre, et ainsi de
+            suite.
+          </p>
+        </div>
+      </div>
+      <p className="mt-4 text-xs leading-5 text-muted-foreground">
+        En abonnement, le report commence après ta première période payée et continue tant que l'abonnement est actif. Si tu résilies, tout ce qui te reste
+        est utilisable jusqu'à la fin de la période déjà payée. Si tu changes d'offre, le report est recalculé avec les limites de la nouvelle offre. En gratuit,
+        le report fonctionne de la même façon d'un mois civil à l'autre.
+      </p>
+    </section>
   );
 }
 

@@ -55,6 +55,7 @@ type BillingRow = {
   period_start: number | null;
   period_end: number | null;
   cancel_at_period_end: boolean;
+  subscribed_at: number | null;
 };
 
 export type BillingState = {
@@ -65,7 +66,10 @@ export type BillingState = {
   cancelAtPeriodEnd: boolean;
   window: { start: number; end: number };
   usage: { audioSec: number; gens: number };
+  /** Limites totales de la période = forfait + report du solde non utilisé de la période précédente. */
   limits: { audioSec: number; gens: number } | null;
+  base: { audioSec: number; gens: number } | null;
+  carry: { audioSec: number; gens: number };
 };
 
 function monthStart(now: number) {
@@ -89,6 +93,27 @@ function usageWindow(plan: PlanId, sub: BillingRow | undefined, now: number) {
   return { start: s, end: addMonth(s) };
 }
 
+/** Période précédente de même durée (semaine, mois d'abonnement ou mois civil). */
+function previousWindow(plan: PlanId, w: { start: number; end: number }, sub: BillingRow | undefined) {
+  if (plan === "free" || !sub?.period_start) {
+    const d = new Date(w.start);
+    return { start: Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - 1, 1), end: w.start };
+  }
+  if (plan === "week") return { start: w.start - 7 * DAY, end: w.start };
+  const d = new Date(w.start);
+  return { start: Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - 1, d.getUTCDate(), d.getUTCHours(), d.getUTCMinutes()), end: w.start };
+}
+
+async function usageBetween(userId: number, start: number, end: number) {
+  const r = await one<{ audio: number; gens: number }>(
+    `select coalesce(sum(audio_seconds) filter (where kind like 'stt%'), 0)::int as audio,
+            count(*) filter (where kind = any($4))::int as gens
+       from public.ai_usage where user_id = $1 and created_at >= $2 and created_at < $3`,
+    [userId, start, end, GEN_KINDS],
+  );
+  return { audioSec: r?.audio ?? 0, gens: r?.gens ?? 0 };
+}
+
 const cache = new Map<number, { at: number; state: BillingState }>();
 export function invalidateBilling(userId: number) {
   cache.delete(userId);
@@ -102,8 +127,8 @@ export async function billingState(u: User, fresh = false): Promise<BillingState
   const hit = cache.get(u.id);
   if (!fresh && hit && Date.now() - hit.at < 20_000) return hit.state;
   const now = Date.now();
-  const row = await one<{ billing_exempt: boolean; stripe_customer_id: string | null }>(
-    `select billing_exempt, stripe_customer_id from public.users where id = $1`,
+  const row = await one<{ billing_exempt: boolean; stripe_customer_id: string | null; created_at: number | string | Date | null }>(
+    `select billing_exempt, stripe_customer_id, created_at from public.users where id = $1`,
     [u.id],
   );
   const exempt = !!row?.billing_exempt || OWNER_EMAILS.includes(u.email.toLowerCase());
@@ -114,12 +139,19 @@ export async function billingState(u: User, fresh = false): Promise<BillingState
   const sub = subs.find((s) => ACTIVE.includes(s.status) && s.plan && (!s.period_end || s.period_end + 2 * DAY > now));
   const plan: PlanId = sub?.plan ?? "free";
   const window = usageWindow(plan, sub, now);
-  const usage = await one<{ audio: number; gens: number }>(
-    `select coalesce(sum(audio_seconds) filter (where kind like 'stt%'), 0)::int as audio,
-            count(*) filter (where kind = any($3))::int as gens
-       from public.ai_usage where user_id = $1 and created_at >= $2`,
-    [u.id, window.start, GEN_KINDS],
-  );
+  const usage = await usageBetween(u.id, window.start, window.end);
+  // Report : ce qui n'a pas été utilisé pendant la période précédente reste disponible pendant la période en cours
+  // (un seul report, plafonné à un forfait). En abonnement, seulement si la période précédente était déjà payée.
+  const base = { audioSec: PLANS[plan].audioSec, gens: PLANS[plan].gens };
+  const prev = previousWindow(plan, window, sub);
+  const rawCreated = row?.created_at instanceof Date ? row.created_at.getTime() : Number(row?.created_at);
+  const createdAt = Number.isFinite(rawCreated) && rawCreated > 0 ? (rawCreated < 1e12 ? rawCreated * 1000 : rawCreated) : Date.now();
+  const eligible = plan === "free" ? createdAt < prev.end : !!sub?.subscribed_at && sub.subscribed_at <= prev.start + DAY;
+  let carry = { audioSec: 0, gens: 0 };
+  if (!exempt && eligible) {
+    const used = await usageBetween(u.id, prev.start, prev.end);
+    carry = { audioSec: Math.max(0, base.audioSec - used.audioSec), gens: Math.max(0, base.gens - used.gens) };
+  }
   const state: BillingState = {
     plan,
     exempt,
@@ -127,8 +159,10 @@ export async function billingState(u: User, fresh = false): Promise<BillingState
     periodEnd: sub?.period_end ?? null,
     cancelAtPeriodEnd: !!sub?.cancel_at_period_end,
     window,
-    usage: { audioSec: usage?.audio ?? 0, gens: usage?.gens ?? 0 },
-    limits: exempt ? null : { audioSec: PLANS[plan].audioSec, gens: PLANS[plan].gens },
+    usage,
+    limits: exempt ? null : { audioSec: base.audioSec + carry.audioSec, gens: base.gens + carry.gens },
+    base: exempt ? null : base,
+    carry,
   };
   cache.set(u.id, { at: now, state });
   return state;
@@ -144,8 +178,8 @@ export async function quotaError(u: User, kind: "audio" | "gen", extraAudioSec =
       plan: s.plan,
       message:
         s.plan === "free"
-          ? "Tu as utilisé ta 1 h de transcription gratuite ce mois-ci. Passe à Premium pour continuer à enregistrer."
-          : `Limite de ${Math.round(s.limits.audioSec / HOUR)} h de transcription atteinte pour cette période.`,
+          ? "Tu as utilisé tout ton temps de transcription gratuit ce mois-ci (report compris). Passe à Premium pour continuer à enregistrer."
+          : `Tu as utilisé tes ${Math.round(s.limits.audioSec / HOUR)} h de transcription de cette période (report compris).`,
     };
   }
   if (kind === "gen" && s.usage.gens >= s.limits.gens) {
@@ -154,8 +188,8 @@ export async function quotaError(u: User, kind: "audio" | "gen", extraAudioSec =
       plan: s.plan,
       message:
         s.plan === "free"
-          ? `Tu as utilisé tes ${s.limits.gens} générations IA gratuites ce mois-ci. Passe à Premium pour générer notes, fiches, exercices et examens sans attendre.`
-          : `Limite de ${s.limits.gens} générations atteinte pour cette période.`,
+          ? `Tu as utilisé tes ${s.limits.gens} générations IA gratuites ce mois-ci (report compris). Passe à Premium pour générer notes, fiches, exercices et examens sans attendre.`
+          : `Tu as utilisé tes ${s.limits.gens} générations IA de cette période (report compris).`,
     };
   }
   return null;
@@ -199,14 +233,16 @@ async function upsertSubscription(s: any) {
   const customer = typeof s.customer === "string" ? s.customer : s.customer?.id;
   if (!customer) return;
   await q(
-    `insert into public.billing (customer_id, subscription_id, status, plan, price_id, period_start, period_end, cancel_at_period_end, updated_at, user_id)
-     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, (select id from public.users where stripe_customer_id = $1))
+    `insert into public.billing (customer_id, subscription_id, status, plan, price_id, period_start, period_end, cancel_at_period_end, updated_at, subscribed_at, user_id)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, (select id from public.users where stripe_customer_id = $1))
      on conflict (customer_id) do update set
        subscription_id = excluded.subscription_id, status = excluded.status, plan = excluded.plan, price_id = excluded.price_id,
        period_start = excluded.period_start, period_end = excluded.period_end, cancel_at_period_end = excluded.cancel_at_period_end,
-       updated_at = excluded.updated_at, user_id = coalesce(public.billing.user_id, excluded.user_id)
+       updated_at = excluded.updated_at,
+       subscribed_at = case when public.billing.subscription_id = excluded.subscription_id then coalesce(public.billing.subscribed_at, excluded.subscribed_at) else excluded.subscribed_at end,
+       user_id = coalesce(public.billing.user_id, excluded.user_id)
      where public.billing.updated_at <= excluded.updated_at`,
-    [customer, s.id, s.status, plan, priceId ?? null, start, end, !!(s.cancel_at_period_end || s.cancel_at), Number(s.__eventCreated) || Date.now()],
+    [customer, s.id, s.status, plan, priceId ?? null, start, end, !!(s.cancel_at_period_end || s.cancel_at), Number(s.__eventCreated) || Date.now(), sec(s.start_date) ?? start],
   );
   const r = await one<{ user_id: number | null }>(`select user_id from public.billing where customer_id = $1`, [customer]);
   if (r?.user_id) invalidateBilling(r.user_id);
