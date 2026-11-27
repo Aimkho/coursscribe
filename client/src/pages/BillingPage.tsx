@@ -16,7 +16,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 
-type PlanId = "free" | "week" | "month" | "year";
+type PlanId = "free" | "twoweeks" | "month" | "year";
 export type Billing = {
   plan: PlanId;
   exempt: boolean;
@@ -29,7 +29,7 @@ export type Billing = {
   base: { audioSec: number; gens: number } | null;
   carry: { audioSec: number; gens: number };
   plans: Record<PlanId, { label: string; price: string; audioSec: number; gens: number; window: string }>;
-  checkout: Record<"week" | "month" | "year", string>;
+  checkout: Record<"twoweeks" | "month" | "year", string>;
   portal: string;
 };
 
@@ -52,7 +52,7 @@ function Meter({ icon: Icon, label, used, max, carry, fmt }: { icon: any; label:
         </span>
       </div>
       <div className="mt-2 h-2 overflow-hidden rounded-full bg-muted">
-        <div className={cn("h-full rounded-full", pct >= 90 ? "bg-[#FE277E]" : "bg-primary")} style={{ width: `${pct}%` }} />
+        <div className={cn("h-full rounded-full", pct >= 90 ? "bg-[#FE277E]" : "cs-bar")} style={{ width: `${pct}%` }} />
       </div>
       <p className="mt-1.5 text-xs text-muted-foreground">
         Il te reste <strong className="text-foreground">{fmt(Math.max(0, max - used))}</strong>
@@ -62,10 +62,10 @@ function Meter({ icon: Icon, label, used, max, carry, fmt }: { icon: any; label:
   );
 }
 
-const OFFERS: { id: "week" | "month" | "year"; note: string; highlight?: boolean }[] = [
-  { id: "week", note: "Pour une semaine de partiels ou un rattrapage." },
+const OFFERS: { id: "twoweeks" | "month" | "year"; note: string; highlight?: boolean }[] = [
+  { id: "twoweeks", note: "Pour une période de partiels ou un rattrapage. Renouvelé toutes les 2 semaines, résiliable à tout moment." },
   { id: "month", note: "Le plus simple pour suivre tous tes cours.", highlight: true },
-  { id: "year", note: "Environ 5,83 € par mois, soit 2 mois offerts." },
+  { id: "year", note: "49,99 / 12 = 4,17 € par mois, soit 21,89 € d'économie par rapport à 12 mois en Mensuel." },
 ];
 
 export default function BillingPage() {
@@ -102,7 +102,7 @@ export default function BillingPage() {
   return (
     <div className="space-y-8" data-testid="page-billing">
       <header>
-        <h1 className="font-display text-2xl font-bold tracking-tight sm:text-3xl">Abonnement</h1>
+        <h1 className="cs-title font-display text-2xl font-bold tracking-tight sm:text-3xl">Abonnement</h1>
         <p className="mt-1 text-sm text-muted-foreground">Paiement sécurisé par Stripe. Sans engagement, résiliable à tout moment.</p>
       </header>
 
@@ -165,7 +165,7 @@ export default function BillingPage() {
       {!data.exempt && (
         <section>
           <h2 className="mb-4 text-lg font-semibold">{paid ? "Changer d'offre" : "Passer à Premium"}</h2>
-          <div className="grid gap-4 md:grid-cols-3">
+          <div className="cs-stagger grid gap-4 md:grid-cols-3">
             {OFFERS.map((o) => {
               const p = data.plans[o.id];
               const current = data.plan === o.id;
@@ -174,12 +174,12 @@ export default function BillingPage() {
                   key={o.id}
                   className={cn(
                     "relative flex flex-col rounded-2xl border bg-card p-5",
-                    o.highlight ? "border-primary shadow-[0_0_0_1px_#7D4FFE]" : "border-card-border",
+                    o.highlight ? "cs-glow-border border-primary" : "cs-card border-card-border",
                   )}
                   data-testid={`plan-${o.id}`}
                 >
                   {o.highlight && (
-                    <span className="absolute -top-3 left-5 rounded-full bg-[#FE277E] px-2.5 py-0.5 text-xs font-semibold text-white">Le plus choisi</span>
+                    <span className="absolute -top-3 left-5 z-10 rounded-full bg-gradient-to-r from-[#FE277E] to-[#7D4FFE] px-2.5 py-0.5 text-xs font-semibold text-white shadow-md">Le plus choisi</span>
                   )}
                   <p className="text-sm font-semibold text-primary">{p.label}</p>
                   <p className="mt-2 font-display text-2xl font-bold">{p.price}</p>
@@ -192,7 +192,7 @@ export default function BillingPage() {
                       <Check className="mt-0.5 h-4 w-4 shrink-0 text-primary" /> {p.gens} générations IA {p.window}
                     </li>
                     <li className="flex gap-2">
-                      <Check className="mt-0.5 h-4 w-4 shrink-0 text-primary" /> Non utilisé : reporté sur la {o.id === "week" ? "semaine" : "période"} suivante
+                      <Check className="mt-0.5 h-4 w-4 shrink-0 text-primary" /> Non utilisé : reporté sur la période suivante
                     </li>
                     <li className="flex gap-2">
                       <Check className="mt-0.5 h-4 w-4 shrink-0 text-primary" /> Exercices faits en classe, cas pratiques, examens notés

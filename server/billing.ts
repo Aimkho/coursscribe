@@ -8,18 +8,22 @@ import type { User } from "@shared/schema";
  * Gestion / résiliation : portail client Stripe (connexion par e-mail).
  */
 
-export type PlanId = "free" | "week" | "month" | "year";
+export type PlanId = "free" | "twoweeks" | "month" | "year";
 
 /** Liens de paiement et portail (identifiants publics, non secrets). Surchargeables par variables d'environnement. */
 export const STRIPE = {
   links: {
-    week: process.env.STRIPE_LINK_WEEK || "https://buy.stripe.com/fZu9ATepd8UJbLtgOR8so00",
-    month: process.env.STRIPE_LINK_MONTH || "https://buy.stripe.com/fZu14n2Gv3Ap16P5698so01",
-    year: process.env.STRIPE_LINK_YEAR || "https://buy.stripe.com/9B63cv80Pc6Vg1J5698so02",
+    twoweeks: process.env.STRIPE_LINK_TWOWEEKS || "https://buy.stripe.com/00w3cv3Kz0od7vd4258so03",
+    month: process.env.STRIPE_LINK_MONTH_V2 || "https://buy.stripe.com/3cI6oHa8X4Et9Dl8il8so04",
+    year: process.env.STRIPE_LINK_YEAR_V2 || "https://buy.stripe.com/fZu9AT1Cr6MBdTB8il8so05",
   },
   portal: process.env.STRIPE_PORTAL_URL || "https://billing.stripe.com/p/login/fZu9ATepd8UJbLtgOR8so00",
   prices: {
-    price_1Ug0FUFUc88TI49NvivfElaM: "week",
+    price_1UgPI4FUc88TI49NILsJexxB: "twoweeks",
+    price_1UgPI6FUc88TI49NmdncbD8S: "month",
+    price_1UgPI9FUc88TI49NTziMLIu3: "year",
+    // anciens tarifs (archivés, aucun abonné) : conservés pour la lecture des événements
+    price_1Ug0FUFUc88TI49NvivfElaM: "twoweeks",
     price_1Ug0FWFUc88TI49NqCrHYdCf: "month",
     price_1Ug0FYFUc88TI49N0HZ98BIT: "year",
   } as Record<string, PlanId>,
@@ -28,13 +32,14 @@ export const STRIPE = {
 const HOUR = 3600;
 /**
  * Limites d'usage par période (usage raisonnable). Fixées à partir du coût réel mesuré de l'API Gemini :
- * ≈ 0,036 $ par heure transcrite et ≈ 0,017 $ par génération (notes, fiche, exercices, examen, exercices en classe).
+ * 0,0313 € par heure transcrite et 0,0171 € par génération. Prix TTC (TVA 20 %), frais carte 1,5 % + 0,25 €,
+ * Billing 0,7 %, Managed Payments 3,5 % : chaque formule reste bénéficiaire même quota entièrement consommé.
  */
 export const PLANS: Record<PlanId, { label: string; price: string; audioSec: number; gens: number; window: string }> = {
   free: { label: "Gratuit", price: "0 €", audioSec: 1 * HOUR, gens: 3, window: "par mois" },
-  week: { label: "Hebdomadaire", price: "2,99 € / semaine", audioSec: 20 * HOUR, gens: 25, window: "par semaine" },
-  month: { label: "Mensuel", price: "7,99 € / mois", audioSec: 80 * HOUR, gens: 100, window: "par mois" },
-  year: { label: "Annuel", price: "69,99 € / an", audioSec: 80 * HOUR, gens: 100, window: "par mois" },
+  twoweeks: { label: "Pass 2 semaines", price: "2,99 € / 2 semaines", audioSec: 25 * HOUR, gens: 30, window: "toutes les 2 semaines" },
+  month: { label: "Mensuel", price: "5,99 € / mois", audioSec: 50 * HOUR, gens: 60, window: "par mois" },
+  year: { label: "Annuel", price: "49,99 € / an", audioSec: 50 * HOUR, gens: 60, window: "par mois" },
 };
 
 const OWNER_EMAILS = (process.env.OWNER_EMAILS || "kouassikoffiaime631@gmail.com")
@@ -81,25 +86,25 @@ function addMonth(t: number) {
   return Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate(), d.getUTCHours(), d.getUTCMinutes());
 }
 
-/** Fenêtre de décompte : semaine ou mois d'abonnement en cours (mois glissants pour l'annuel), mois civil en gratuit. */
+/** Fenêtre de décompte : 2 semaines ou mois d'abonnement en cours (mois glissants pour l'annuel), mois civil en gratuit. */
 function usageWindow(plan: PlanId, sub: BillingRow | undefined, now: number) {
   if (plan === "free" || !sub?.period_start) {
     const s = monthStart(now);
     return { start: s, end: addMonth(s) };
   }
-  if (plan === "week" || plan === "month") return { start: sub.period_start, end: sub.period_end || sub.period_start + 31 * DAY };
+  if (plan === "twoweeks" || plan === "month") return { start: sub.period_start, end: sub.period_end || sub.period_start + (plan === "twoweeks" ? 14 : 31) * DAY };
   let s = sub.period_start;
   while (addMonth(s) <= now) s = addMonth(s);
   return { start: s, end: addMonth(s) };
 }
 
-/** Période précédente de même durée (semaine, mois d'abonnement ou mois civil). */
+/** Période précédente de même durée (2 semaines, mois d'abonnement ou mois civil). */
 function previousWindow(plan: PlanId, w: { start: number; end: number }, sub: BillingRow | undefined) {
   if (plan === "free" || !sub?.period_start) {
     const d = new Date(w.start);
     return { start: Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - 1, 1), end: w.start };
   }
-  if (plan === "week") return { start: w.start - 7 * DAY, end: w.start };
+  if (plan === "twoweeks") return { start: w.start - 14 * DAY, end: w.start };
   const d = new Date(w.start);
   return { start: Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - 1, d.getUTCDate(), d.getUTCHours(), d.getUTCMinutes()), end: w.start };
 }
@@ -227,7 +232,7 @@ async function upsertSubscription(s: any) {
   const plan: PlanId | null =
     (priceId && STRIPE.prices[priceId]) ||
     (s.metadata?.plan as PlanId) ||
-    (item?.price?.recurring?.interval === "week" ? "week" : item?.price?.recurring?.interval === "year" ? "year" : item?.price?.recurring?.interval === "month" ? "month" : null);
+    (item?.price?.recurring?.interval === "week" ? "twoweeks" : item?.price?.recurring?.interval === "year" ? "year" : item?.price?.recurring?.interval === "month" ? "month" : null);
   const start = sec(s.current_period_start) ?? sec(item?.current_period_start);
   const end = sec(s.current_period_end) ?? sec(item?.current_period_end);
   const customer = typeof s.customer === "string" ? s.customer : s.customer?.id;

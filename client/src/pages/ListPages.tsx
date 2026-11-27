@@ -102,7 +102,7 @@ function SubjectGroups({ list, subjects }: { list: CourseSummary[]; subjects: Su
               </Button>
             )}
           </div>
-          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+          <div className="cs-stagger grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
             {g.items.map((c) => (
               <CourseCard key={c.id} c={c} href={`/course/${c.id}`} hideSubject={!!g.id} />
             ))}
@@ -115,7 +115,7 @@ function SubjectGroups({ list, subjects }: { list: CourseSummary[]; subjects: Su
 
 function Stat({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-xl border border-card-border bg-card px-4 py-3">
+    <div className="cs-stat rounded-xl border border-card-border bg-card px-4 py-3">
       <p className="text-xs text-muted-foreground">{label}</p>
       <p className="mt-0.5 text-lg font-semibold tabular-nums">{value}</p>
     </div>
@@ -136,7 +136,7 @@ export function DashboardPage() {
       <div className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <p className="text-sm text-muted-foreground">Bonjour {firstName}</p>
-          <h1 className="font-display text-xl font-bold">Mes cours</h1>
+          <h1 className="cs-title font-display text-xl font-bold">Mes cours</h1>
         </div>
         <Button asChild size="lg" data-testid="button-new-course">
           <Link href="/record">
@@ -146,7 +146,7 @@ export function DashboardPage() {
       </div>
 
       {data && data.length > 0 && (
-        <div className="mb-8 grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <div className="cs-stagger mb-8 grid grid-cols-2 gap-3 sm:grid-cols-4">
           <Stat label="Matières · chapitres" value={`${new Set(data.map((c) => c.subjectId ?? 0)).size} · ${data.length}`} />
           <Stat label="Temps enregistré" value={formatDuration(totalSec)} />
           <Stat label="Fiches prêtes" value={String(data.filter((c) => c.hasSheet).length)} />
@@ -159,7 +159,7 @@ export function DashboardPage() {
 
       {data && data.length === 0 && (
         <div className="rounded-2xl border border-dashed border-primary/30 bg-secondary/40 px-6 py-14 text-center">
-          <span className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-primary text-primary-foreground">
+          <span className="cs-float mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-primary text-primary-foreground">
             <Mic className="h-5 w-5" />
           </span>
           <h2 className="mt-4 text-lg font-semibold">Ton premier cours t'attend</h2>
@@ -220,7 +220,7 @@ export function DashboardPage() {
           ) : view === "subjects" ? (
             <SubjectGroups list={f.filtered} subjects={subjects} />
           ) : (
-            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+            <div className="cs-stagger grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
               {f.filtered.map((c) => (
                 <CourseCard key={c.id} c={c} href={`/course/${c.id}`} />
               ))}
@@ -241,7 +241,7 @@ export function LibraryPage() {
         <p className="inline-flex items-center gap-1.5 text-sm font-medium text-primary">
           <Globe2 className="h-4 w-4" /> Communauté
         </p>
-        <h1 className="mt-1 font-display text-xl font-bold">Bibliothèque publique</h1>
+        <h1 className="cs-title mt-1 font-display text-xl font-bold">Bibliothèque publique</h1>
         <p className="mt-1.5 text-sm text-muted-foreground">
           Les cours que les utilisateurs ont choisi de publier. Consulte leurs notes, révise leurs fiches et entraîne-toi sur leurs exercices et
           examens.
@@ -264,7 +264,7 @@ export function LibraryPage() {
           {f.filtered.length === 0 ? (
             <p className="py-10 text-center text-sm text-muted-foreground">Aucun cours ne correspond à ta recherche.</p>
           ) : (
-            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+            <div className="cs-stagger grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
               {f.filtered.map((c) => (
                 <CourseCard key={c.id} c={c} href={c.isOwner ? `/course/${c.id}` : `/public/${c.id}`} showOwner />
               ))}

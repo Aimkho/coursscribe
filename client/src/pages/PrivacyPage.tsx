@@ -66,7 +66,7 @@ export default function PrivacyPage() {
     <div className="space-y-8">
       <div>
         <p className="text-sm font-medium text-muted-foreground">Compte</p>
-        <h1 className="mt-1 font-display text-xl font-bold">Confidentialité et données</h1>
+        <h1 className="cs-title mt-1 font-display text-xl font-bold">Confidentialité et données</h1>
       </div>
 
       <section className="flex flex-col gap-4 rounded-xl border border-border bg-card p-5 sm:flex-row sm:items-center">

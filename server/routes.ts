@@ -356,7 +356,7 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     res.json({
       ...state,
       plans: PLANS,
-      checkout: { week: checkoutUrl("week", u), month: checkoutUrl("month", u), year: checkoutUrl("year", u) },
+      checkout: { twoweeks: checkoutUrl("twoweeks", u), month: checkoutUrl("month", u), year: checkoutUrl("year", u) },
       portal: portalUrl(u),
     });
   }));

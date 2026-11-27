@@ -408,7 +408,7 @@ export default function RecordPage({ continueId, subjectId: presetSubject }: { c
             <ArrowLeft className="h-4 w-4" /> {baseCourse.title}
           </Link>
         )}
-        <h1 className="font-display text-xl font-bold">{continuing ? `Continuer le cours — séance ${nextIdx}` : "Enregistrer un cours"}</h1>
+        <h1 className="cs-title font-display text-xl font-bold">{continuing ? `Continuer le cours — séance ${nextIdx}` : "Enregistrer un cours"}</h1>
         <p className="mt-1 text-sm text-muted-foreground">
           {continuing
             ? "La suite du cours s'ajoute au texte des séances précédentes, avec la date de la séance."
@@ -551,7 +551,7 @@ export default function RecordPage({ continueId, subjectId: presetSubject }: { c
 
             <div className="flex gap-2">
               {(rec.state === "idle" || rec.state === "starting") && (
-                <Button className="h-12 flex-1 text-base" onClick={rec.start} disabled={rec.state === "starting" || !!importing || !!docImport} data-testid="button-start">
+                <Button className="cs-record-cta h-12 flex-1 text-base" onClick={rec.start} disabled={rec.state === "starting" || !!importing || !!docImport} data-testid="button-start">
                   {rec.state === "starting" ? <Loader2 className="mr-2 h-5 w-5 animate-spin" /> : <Mic className="mr-2 h-5 w-5" />}
                   {continuing ? `Démarrer la séance ${nextIdx}` : "Démarrer"}
                 </Button>

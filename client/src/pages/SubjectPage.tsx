@@ -101,7 +101,7 @@ export default function SubjectPage({ id }: { id: number }) {
             </div>
           ) : (
             <div className="mt-1 flex items-center gap-2">
-              <h1 className="truncate font-display text-xl font-bold" data-testid="text-subject-name">
+              <h1 className="cs-title truncate font-display text-xl font-bold" data-testid="text-subject-name">
                 {subject.name}
               </h1>
               <button

@@ -38,7 +38,7 @@ export function CourseCard({ c, href, showOwner, hideSubject }: { c: CourseSumma
     <Link
       href={href}
       data-testid={`card-course-${c.id}`}
-      className="group flex min-w-0 flex-col rounded-2xl border border-card-border bg-card p-5 transition-all hover:-translate-y-0.5 hover:border-primary/40 hover:shadow-[0_8px_30px_-12px_rgba(125,79,254,0.35)]"
+      className="cs-card group flex min-w-0 flex-col rounded-2xl border border-card-border bg-card p-5"
     >
       <div className="flex items-center justify-between gap-3">
         <span className="truncate text-xs font-semibold uppercase tracking-wider text-primary">
@@ -55,7 +55,7 @@ export function CourseCard({ c, href, showOwner, hideSubject }: { c: CourseSumma
           </span>
         )}
       </div>
-      <h3 className="mt-2 line-clamp-2 break-anywhere text-base font-semibold leading-snug group-hover:text-primary">{c.title}</h3>
+      <h3 className="mt-2 line-clamp-2 break-anywhere text-base font-semibold leading-snug transition-colors group-hover:text-primary">{c.title}</h3>
       <p className="mt-2 line-clamp-3 break-anywhere text-sm leading-relaxed text-muted-foreground">
         {c.summary || "Pas encore de contenu analysé."}
       </p>
@@ -95,7 +95,7 @@ export function CourseGridSkeleton() {
   return (
     <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
       {Array.from({ length: 6 }).map((_, i) => (
-        <div key={i} className="h-56 animate-pulse rounded-2xl border border-card-border bg-muted/50" />
+        <div key={i} className="cs-shimmer h-56 rounded-2xl border border-card-border" />
       ))}
     </div>
   );

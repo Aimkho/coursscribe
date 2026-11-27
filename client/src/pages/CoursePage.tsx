@@ -380,7 +380,7 @@ export default function CoursePage({ id, publicView }: { id: number; publicView?
     if (!content)
       return (
         <div className="rounded-2xl border border-dashed border-primary/30 bg-secondary/30 px-6 py-14 text-center">
-          <span className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-primary text-primary-foreground">
+          <span className="cs-float mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-gradient-to-br from-[#7D4FFE] to-[#B05BFF] text-primary-foreground">
             <Sparkles className="h-5 w-5" />
           </span>
           <h3 className="mt-4 text-base font-semibold">{GEN_INFO[kind].title}</h3>
@@ -451,7 +451,7 @@ export default function CoursePage({ id, publicView }: { id: number; publicView?
             {owner && <StatusBadge status={course.status} />}
             {course.level && <span className="rounded-md bg-muted px-2 py-0.5 text-muted-foreground">{course.level}</span>}
           </div>
-          <h1 className="mt-1.5 break-anywhere font-display text-xl font-bold leading-tight" data-testid="text-course-title">
+          <h1 className="cs-title mt-1.5 break-anywhere font-display text-xl font-bold leading-tight" data-testid="text-course-title">
             {course.title}
           </h1>
           <p className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-muted-foreground">
@@ -622,7 +622,7 @@ export default function CoursePage({ id, publicView }: { id: number; publicView?
       )}
 
       {owner && missing.length > 0 && words >= 40 && (
-        <div className="no-print mb-6 flex flex-col gap-3 rounded-2xl bg-primary p-4 text-primary-foreground sm:flex-row sm:items-center sm:justify-between sm:px-5">
+        <div className="no-print mb-6 flex flex-col gap-3 rounded-2xl bg-[linear-gradient(110deg,#7D4FFE,#9466FF_45%,#B05BFF_70%,#7D4FFE)] bg-[length:220%_100%] p-4 text-primary-foreground shadow-[0_14px_34px_-16px_rgba(125,79,254,.8)] [animation:cs-gradient-pan_8s_ease-in-out_infinite] sm:flex-row sm:items-center sm:justify-between sm:px-5">
           <div>
             <p className="text-sm font-semibold">{anyPending ? "Génération en cours…" : "Tout préparer en un clic"}</p>
             <p className="text-sm text-white/80">
@@ -647,8 +647,8 @@ export default function CoursePage({ id, publicView }: { id: number; publicView?
                 onClick={() => setTab(t.id)}
                 data-testid={`tab-${t.id}`}
                 className={cn(
-                  "-mb-px inline-flex shrink-0 items-center gap-2 whitespace-nowrap border-b-2 px-3.5 py-2.5 text-sm font-medium transition-colors",
-                  tab === t.id ? "border-primary text-foreground" : "border-transparent text-muted-foreground hover:text-foreground",
+                  "cs-tab -mb-px inline-flex shrink-0 items-center gap-2 whitespace-nowrap rounded-t-lg border-b-2 px-3.5 py-2.5 text-sm font-medium",
+                  tab === t.id ? "border-primary bg-secondary/50 text-foreground" : "border-transparent text-muted-foreground hover:bg-secondary/30 hover:text-foreground",
                 )}
               >
                 <t.icon className={cn("h-4 w-4", tab === t.id && "text-primary")} />

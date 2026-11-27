@@ -13,7 +13,7 @@ const NAV = [
 
 export function BrandMark({ className }: { className?: string }) {
   return (
-    <div className={cn("flex items-center gap-2.5", className)}>
+    <div className={cn("cs-brand flex items-center gap-2.5", className)}>
       <span className="grid h-10 w-10 shrink-0 place-items-center overflow-hidden rounded-xl bg-white ring-1 ring-black/5">
         <img src="./logo-mark.png" alt="" width={34} height={34} className="h-[34px] w-[34px] object-contain" />
       </span>
@@ -55,14 +55,15 @@ export function AppShell({ children }: { children: ReactNode }) {
                 key={n.href}
                 href={n.href}
                 data-testid={n.test}
+                data-active={active}
                 className={cn(
-                  "flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors",
+                  "cs-nav-item flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium",
                   active ? "bg-sidebar-accent text-sidebar-accent-foreground" : "text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground",
                 )}
               >
                 <n.icon className="h-[18px] w-[18px]" />
                 {n.label}
-                {n.href === "/record" && <span className="ml-auto h-2 w-2 rounded-full bg-[#FE277E]" aria-hidden />}
+                {n.href === "/record" && <span className="rec-pulse ml-auto h-2 w-2 rounded-full bg-[#FE277E]" aria-hidden />}
               </Link>
             );
           })}
@@ -120,11 +121,11 @@ export function AppShell({ children }: { children: ReactNode }) {
       </header>
 
       <main className="pb-[calc(6rem+env(safe-area-inset-bottom))] lg:pb-10 lg:pl-64">
-        <div className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6 lg:px-10 lg:py-10">{children}</div>
+        <div key={loc} className="cs-page mx-auto w-full max-w-6xl px-4 py-6 sm:px-6 lg:px-10 lg:py-10">{children}</div>
       </main>
 
       {/* Navigation basse mobile */}
-      <nav className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-4 border-t border-border bg-background pb-[env(safe-area-inset-bottom)] lg:hidden" aria-label="Navigation">
+      <nav className="fixed inset-x-0 bottom-0 z-30 grid grid-cols-4 border-t border-border bg-background/90 pb-[env(safe-area-inset-bottom)] backdrop-blur-md lg:hidden" aria-label="Navigation">
         {NAV.map((n) => {
           const active = isActive(loc, n.href);
           return (
@@ -132,7 +133,8 @@ export function AppShell({ children }: { children: ReactNode }) {
               key={n.href}
               href={n.href}
               data-testid={`${n.test}-mobile`}
-              className={cn("flex flex-col items-center gap-1 py-2.5 text-xs font-medium", active ? "text-primary" : "text-muted-foreground")}
+              data-active={active}
+              className={cn("cs-mnav-item flex flex-col items-center gap-1 py-2.5 text-xs font-medium", active ? "text-primary" : "text-muted-foreground")}
             >
               <n.icon className="h-5 w-5" />
               {n.label}

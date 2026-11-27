@@ -40,23 +40,24 @@ export default function AuthPage() {
   return (
     <div className="grid min-h-dvh lg:grid-cols-[1.05fr_1fr]">
       <section className="relative hidden overflow-hidden bg-[#1A1033] p-12 text-white lg:flex lg:flex-col">
-        <div className="pointer-events-none absolute -right-24 -top-24 h-80 w-80 rounded-full bg-[#7D4FFE] opacity-40 blur-3xl" />
-        <div className="pointer-events-none absolute -bottom-32 left-10 h-72 w-72 rounded-full bg-[#FE277E] opacity-20 blur-3xl" />
+        <div className="cs-blob pointer-events-none absolute -right-24 -top-24 h-80 w-80 rounded-full bg-[#7D4FFE] opacity-40 blur-3xl" />
+        <div className="cs-blob-2 pointer-events-none absolute left-1/3 top-1/3 h-56 w-56 rounded-full bg-[#C49FFF] opacity-[0.12] blur-3xl" />
+        <div className="cs-blob-2 pointer-events-none absolute -bottom-32 left-10 h-72 w-72 rounded-full bg-[#FE277E] opacity-20 blur-3xl" />
         <BrandMark className="relative [&_span:last-child]:text-white" />
-        <div className="relative mt-auto max-w-lg">
+        <div className="cs-page relative mt-auto max-w-lg">
           <p className="mb-4 text-sm font-medium uppercase tracking-[0.18em] text-[#C49FFF]">Pour élèves et étudiants</p>
           <h1 className="font-display text-[2.6rem] font-extrabold leading-[1.05]">
             Écoute ton cours.
             <br />
-            On s'occupe des notes.
+            <span className="cs-hero-accent">On s'occupe des notes.</span>
           </h1>
           <p className="mt-5 text-base leading-relaxed text-white/75">
             CoursScribe transcrit ton cours en direct, en extrait l'essentiel et le transforme en fiches de révision, exercices et examens
             blancs.
           </p>
-          <ul className="mt-10 grid grid-cols-2 gap-x-6 gap-y-6">
+          <ul className="cs-stagger mt-10 grid grid-cols-2 gap-x-6 gap-y-6">
             {FEATURES.map((f) => (
-              <li key={f.title} className="flex gap-3">
+              <li key={f.title} className="cs-feature flex gap-3">
                 <span className="mt-0.5 grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-white/10 text-[#C49FFF]">
                   <f.icon className="h-[18px] w-[18px]" />
                 </span>
@@ -71,7 +72,7 @@ export default function AuthPage() {
       </section>
 
       <section className="flex items-center justify-center px-5 py-10 sm:px-10">
-        <div className="w-full max-w-sm">
+        <div className="cs-page w-full max-w-sm">
           <BrandMark className="mb-10 lg:hidden" />
           <h2 className="font-display text-xl font-bold">{mode === "register" ? "Crée ton compte" : "Bon retour"}</h2>
           <p className="mt-1.5 text-sm text-muted-foreground">
